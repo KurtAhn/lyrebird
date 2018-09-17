@@ -8,13 +8,15 @@ DATA_PATH = path.dirname(path.realpath(__file__))
 def read_strokes(sort=True):
     with open(path.join(DATA_PATH, 'strokes.npy'), 'rb') as f:
         strokes = np.load(f, encoding='bytes')
-    if sort:
-        strokes = strokes[np.argsort([len(s) for s in strokes])]
     for n in range(len(strokes)):
         finish = np.zeros([len(strokes[n]), 1])
         finish[-1,0] = 1.0
         strokes[n] = np.concatenate([finish, strokes[n]], axis=-1)
     return strokes
+
+
+def sort_strokes(strokes):
+    return strokes[np.argsort([len(s) for s in strokes])]
 
 
 def standardize_strokes(strokes):

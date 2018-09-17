@@ -30,11 +30,13 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--learning-rate', type=float, default=1e-4)
     parser.add_argument('-c', '--clip-threshold', type=float, default=100.0)
     parser.add_argument('-s', '--dont-standardize', dest='standardize', action='store_false')
-    parser.add_argument('-B', '--batch-size', dest='batch_size', type=int, default=10)
+    parser.add_argument('-b', '--batch-size', dest='batch_size', type=int, default=10)
+    parser.add_argument('-o', '--output', dest='output', default='conditional')
+
     args = parser.parse_args()
 
     MDLDEF = path.join(path.dirname(path.realpath(__file__)), 'mdldef')
-    mdldir = path.join(MDLDEF, 'conditional')
+    mdldir = path.join(MDLDEF, args.output)
 
     with tf.Session().as_default() as session:
         strokes = read_strokes()
@@ -48,16 +50,16 @@ if __name__ == '__main__':
         train_size = 5500
         train = conditional_dataset(
             sentences[:train_size],
-            strokes[:train_size],
+            sort_strokes(strokes[:train_size]),
             batch_size=args.batch_size
-        )
+        ).shuffle(min(train_size, 10000), seed=1337)
         train_iterator = train.make_initializable_iterator()
         train_example = train_iterator.get_next()
 
         valid_size = 500
         valid = conditional_dataset(
             sentences[-valid_size:],
-            strokes[-valid_size:],
+            sort_strokes(strokes[-valid_size:]),
             batch_size=args.batch_size
         )
         valid_iterator = valid.make_initializable_iterator()

@@ -417,28 +417,13 @@ class Conditional(ModelBase):
             tf.reduce_max(self.text_length, name='max_text_length')
             tf.identity(tf.shape(self.text)[0], name='batch_size')
 
-            # tf.one_hot(character_table.lookup(self.text),
-            #            self.num_chars,
-            #            name='c')
-            # tf.expand_dims(tf.range(1, tf.cast(self.text_length, 'float') + 1),
-            #                1, name='u')
-            # tf.concat([self.c, self.u], axis=-1, name='cu')
-
             init = tf.contrib.layers.xavier_initializer()
-
 
             target_ta = tf.TensorArray(
                 'float',
                 # size=self.batch_size
                 size=self.max_target_length
             ).unstack(tf.transpose(self.target, perm=[1,0, 2]))
-
-            text_ta = tf.TensorArray(
-                'string',
-                # size=self.batch_size,
-                size=self.max_text_length,
-                clear_after_read=False
-            ).unstack(tf.transpose(self.text, perm=[1, 0]))
 
             with tf.variable_scope(
                 'rnn',
@@ -468,7 +453,7 @@ class Conditional(ModelBase):
                         )
                     )
 
-                def forward(t, x, q1, q2_ta, k, w, o_ta):
+                def forward(t, x, q1, q2, k, w, o_ta):
                     h, q1 = rnn1(tf.concat([x, w], axis=-1), q1)
                     z_ = tf.reshape(tf.layers.dense(
                         h,
@@ -481,43 +466,31 @@ class Conditional(ModelBase):
                     b = tf.exp(z_[:,K:2*K])
                     k += tf.exp(z_[:,2*K:])
 
-                    # w = tf.expand_dims(tf.reduce_sum(
-                    #     tf.map_fn(
-                    #         lambda cu: \
-                    #             tf.reduce_sum(a * tf.exp(-b * tf.square(k - cu[-1]))) * \
-                    #                 cu[:-1],
-                    #         self.cu
-                    #     ),
-                    #     axis=-2
-                    # ), 0)
-
-                    def window_weight(u):
-                        return tf.reduce_sum(a * tf.exp(-b * tf.square(k - u)))
-
-                    def window(_i, _w):
-                        _w += window_weight(tf.cast(_i + 1, 'float')) * \
-                              tf.one_hot(character_table.lookup(text_ta.read(_i)),
-                                         self.num_chars)
-                        return _i + 1, _w
-
-                    #FIXME Possibly wrong
-                    i = tf.constant(0, dtype='int32')
-                    w = tf.zeros([self.batch_size, self.num_chars], dtype='float')
-                    _, w = tf.while_loop(
-                        lambda _i, _w: _i < self.max_text_length,
-                        window,
-                        [i, w]
+                    u = tf.tile(
+                        tf.reshape(
+                            tf.range(1, tf.cast(self.max_text_length, 'float') + 1),
+                            [1, 1, -1]
+                        ), [self.batch_size, K, 1])
+                    c = tf.one_hot(
+                        character_table.lookup(self.text),
+                        self.num_chars
+                    )
+                    phi = tf.reduce_sum(
+                        tf.expand_dims(a, -1) * \
+                        tf.exp(
+                            tf.expand_dims(-b, -1) *
+                            tf.square(tf.expand_dims(k, -1) - u)
+                        ),
+                        axis=1
+                    )
+                    w = tf.reduce_sum(
+                        tf.expand_dims(phi, -1) * c,
+                        axis=1
                     )
 
-                    next_q2_ta = tf.TensorArray(
-                        'float',
-                        size=self.num_layers,
-                        clear_after_read=False
-                    )
                     for d in range(self.num_layers):
-                        h, q2 = rnn2(tf.concat([x, h, w], axis=-1),
-                                     tf.reshape(q2_ta.read(d), [-1, self.num_units]))
-                        next_q2_ta = next_q2_ta.write(d, q2)
+                        h, q2[d] = rnn2(tf.concat([x, h, w], axis=-1),
+                                        tf.reshape(q2[d], [-1, self.num_units]))
 
                     y_ = tf.reshape(tf.layers.dense(
                         h,
@@ -551,16 +524,6 @@ class Conditional(ModelBase):
                                 ],
                                 axis=-1
                             ), [self.batch_size, M, 2, 2])
-                            # covariance_matrix=tf.map_fn(
-                            #     lambda v: tf.reshape(
-                            #         tf.stack([
-                            #             tf.square(v[:,0]),
-                            #             v[:,0] * v[:,1] * v[:,2],
-                            #             v[:,0] * v[:,1] * v[:,2],
-                            #             tf.square(v[:,1])
-                            #         ], axis=-1), [-1, 2, 2]),
-                            #     tf.stack([s1, s2, r], axis=-1)
-                            # )
                         )
                     )
 
@@ -604,24 +567,9 @@ class Conditional(ModelBase):
                         x, loss, sse, f, e, p, m1, m2, s1, s2, r
                     ], axis=-1))
 
-                    return t + 1, tf.reshape(x, [self.batch_size, 4]), q1, next_q2_ta, k, w, o_ta
+                    return t + 1, tf.reshape(x, [self.batch_size, 4]), q1, q2, k, w, o_ta
 
                 time = tf.constant(0, dtype='int32')
-                # output_ta = forward(
-                #     time,
-                #     tf.zeros([self.batch_size, 4], dtype='float'),
-                #     rnn1.zero_state(self.batch_size, dtype='float'),
-                #     tf.TensorArray('float',
-                #                    size=self.num_layers,
-                #                    clear_after_read=False)\
-                #        .unstack(tf.tile(
-                #            tf.expand_dims(rnn2.zero_state(self.batch_size, dtype='float'), 0),
-                #            [self.num_layers, 1, 1]
-                #        )),
-                #     tf.zeros([self.batch_size, K], dtype='float'),
-                #     tf.zeros([self.batch_size, self.num_chars], dtype='float'),
-                #     tf.TensorArray('float', size=0, dynamic_size=True)
-                # )[-1]
 
                 output_ta = tf.while_loop(
                     condition,
@@ -629,15 +577,8 @@ class Conditional(ModelBase):
                     [time,
                      tf.zeros([self.batch_size, 4], dtype='float'),
                      rnn1.zero_state(self.batch_size, dtype='float'),
-                     tf.TensorArray('float',
-                                    size=self.num_layers,
-                                    clear_after_read=False)\
-                        .unstack(tf.tile(
-                            tf.expand_dims(rnn2.zero_state(self.batch_size, dtype='float'), 0),
-                            [self.num_layers, 1, 1]
-                        )),
-                        # .unstack(rnn2.zero_state(self.batch_size * self.num_layers, dtype='float')),
-                     # rnn2.zero_state(1, dtype='float'),
+                     [rnn2.zero_state(self.batch_size, dtype='float')
+                      for d in range(self.num_layers)],
                      tf.zeros([self.batch_size, K], dtype='float'),
                      tf.zeros([self.batch_size, self.num_chars], dtype='float'),
                      tf.TensorArray('float', size=0, dynamic_size=True)
@@ -649,15 +590,12 @@ class Conditional(ModelBase):
                 perm=[1,0,2],
                 name='output'
             )
-            # tf.reshape(output_ta.stack(), [self.batch_size, -1, 4+1+1+6*M+2], name='output')
             tf.add(self.output[:,:,2:4] * self.offset_scale, self.offset_mean,
                    name='stroke_offset')
             tf.concat([self.output[:,:,0:2],
                        self.stroke_offset], axis=-1,
                       name='stroke')
             tf.reduce_sum(self.output[:,:,4], name='loss')
-            # tf.div(tf.reduce_sum(self.output[:,4]),
-                   # tf.cast(self.target_length, 'float'), name='loss')
             tf.reduce_mean(self.output[:,:,5], name='sse')
 
             self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
@@ -688,17 +626,17 @@ class Conditional(ModelBase):
                 }
             )
         else:
-                return session.run(
-                    [self.stroke, self.loss, self.sse],
-                    feed_dict={
-                        self.text: t,
-                        self.text_length: tl,
-                        self.target: x,
-                        self.target_length: xl,
-                        self.is_training: False,
-                        self.is_validating: True,
-                    }
-                )
+            return session.run(
+                [self.stroke, self.loss, self.sse],
+                feed_dict={
+                    self.text: t,
+                    self.text_length: tl,
+                    self.target: x,
+                    self.target_length: xl,
+                    self.is_training: False,
+                    self.is_validating: True,
+                }
+            )
 
     def synth(self, t, **kwargs):
         session = tf.get_default_session()
@@ -749,12 +687,12 @@ def generate_conditionally(text='welcome to lyrebird', random_seed=1, epoch=0,
     return stroke[0]
 
 
-if __name__ == '__main__':
-    # stroke = generate_unconditionally(epoch=int(sys.argv[1]))
-    # print(np.count_nonzero(stroke[:,0]), len(stroke[:,0]))
-    # # print(stroke[:20])
-    # plot_stroke(stroke)
-
-    stroke = generate_conditionally(epoch=int(sys.argv[1]))
-    print(stroke)
-    plot_stroke(stroke)
+# if __name__ == '__main__':
+#     # stroke = generate_unconditionally(epoch=int(sys.argv[1]))
+#     # print(np.count_nonzero(stroke[:,0]), len(stroke[:,0]))
+#     # # print(stroke[:20])
+#     # plot_stroke(stroke)
+#
+#     stroke = generate_conditionally(epoch=int(sys.argv[1]))
+#     print(stroke)
+#     plot_stroke(stroke)
