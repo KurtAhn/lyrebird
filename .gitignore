@@ -1,0 +1,6 @@
+admin/*
+**.pyc
+notebooks/.ipynb_checkpoints/*
+__pycache__
+mdldef/train
+mdldef/
