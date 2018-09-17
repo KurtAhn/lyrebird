@@ -44,42 +44,40 @@ def read_sentences():
     return np.array(sentences), np.unique(np.array(flattened))
 
 
-def unconditional_dataset(strokes):
-    return tf.data.Dataset.zip(
-        (
-            tf.data.Dataset.from_generator(
-                lambda: strokes,
-                tf.as_dtype(strokes[0].dtype)
-            ),
-            tf.data.Dataset.from_generator(
-               lambda: [len(s) for s in strokes],
-               tf.int32
-            )
-        )
+def unconditional_dataset(strokes, batch_size=1):
+    s_ds = tf.data.Dataset.from_generator(
+        lambda: strokes,
+        'float'
     )
-
+    sl_ds = tf.data.Dataset.from_generator(
+        lambda: [len(s) for s in strokes],
+        'int32'
+    )
+    return tf.data.Dataset.zip(
+        (s_ds, sl_ds)
+    ).padded_batch(
+        batch_size,
+        ([None, 4], []),
+        (1.0, 0)
+    )
 
 
 def conditional_dataset(text, strokes, batch_size=1):
     t_ds = tf.data.Dataset.from_generator(
         lambda: text,
         'string'
-        # tf.as_dtype(text[0].dtype)
     )
     tl_ds = tf.data.Dataset.from_generator(
         lambda: [len(t) for t in text],
         'int32'
-        # tf.int32
     )
     s_ds = tf.data.Dataset.from_generator(
         lambda: strokes,
         'float'
-        # tf.as_dtype(strokes[0].dtype)
     )
     sl_ds = tf.data.Dataset.from_generator(
         lambda: [len(s) for s in strokes],
         'int32'
-        # tf.int32
     )
     return tf.data.Dataset.zip(
         (t_ds, tl_ds, s_ds, sl_ds)

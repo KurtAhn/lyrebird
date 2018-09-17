@@ -12,8 +12,9 @@ if __name__ == '__main__':
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
-
 tfd = tfp.distributions
+
+from collections import namedtuple
 
 
 class ModelBase:
@@ -164,15 +165,14 @@ class Unconditional(ModelBase):
         ModelBase.__init__(self, 'Unconditional', **kwargs)
 
     def _create(self, **kwargs):
-        M = self.num_components = kwargs.get('num_components', 20)
-        self.sampler = Sampler(num_components=M)
+        M = self.mixture_size = kwargs.get('mixture_size', 20)
         self.num_units = kwargs.get('num_units', 400)
-        self.num_layers = kwargs.get('num_layers', 3)
+        self.num_layers = kwargs.get('num_layers', 1)
         with tf.name_scope(self.name) as scope:
             # Number of strokes to output
-            tf.placeholder('int32', [], name='length')
+            tf.placeholder('int32', [None], name='length')
             # Target sequence
-            tf.placeholder('float', [None, 3], name='target')
+            tf.placeholder('float', [None, None, 4], name='target')
 
             # Operation mode: training or validating
             tf.placeholder('bool', [], name='is_training')
@@ -181,165 +181,171 @@ class Unconditional(ModelBase):
             # Optimization parameters
             tf.placeholder('float', [], name='learning_rate')
             tf.placeholder('float', [], name='clip_threshold')
-            # tf.placeholder('int64', [], name='seed')
+            tf.placeholder_with_default(
+                tf.constant(0.5, 'float'),
+                shape=[],
+                name='finish_line'
+            )
 
             # Standardization
             tf.constant(kwargs.get('offset_mean', 0.0), name='offset_mean')
             tf.constant(kwargs.get('offset_scale', 1.0), name='offset_scale')
 
+            tf.reduce_max(self.length, name='max_length')
+            tf.identity(tf.shape(self.length)[0], name='batch_size')
+
             with tf.variable_scope(
                 'rnn',
-                initializer=tf.contrib.layers.xavier_initializer()
+                initializer=tf.contrib.layers.xavier_initializer(),
+                reuse=tf.AUTO_REUSE
             ):
-                cell = tf.nn.rnn_cell.MultiRNNCell(
-                    [tf.contrib.rnn.GRUCell(
-                        num_units=self.num_units,
-                        activation=tf.nn.sigmoid)
-                     for d in range(self.num_layers)],
-                    state_is_tuple=True
+                rnn = tf.contrib.rnn.GRUCell(
+                    num_units=self.num_units,
+                    activation=tf.nn.tanh
                 )
 
-            # x_ta = tf.TensorArray('float', dynamic_size=True).unstack(self.x)
-            # y_ta = tf.TensorArray('float', dynamic_size=True)
-            target_ta = tf.TensorArray('float', size=self.length).unstack(self.target)
-            def loop(time, cell_output, cell_state, loop_state):
-                next_loop_state = None
-                if cell_output is None:
-                    next_cell_state = cell.zero_state(1, 'float')
-                    next_input = tf.zeros([1, 3])
-                    # Expose pdf parameters, stroke, and loss to outside world
-                    next_output = tf.zeros([6*M+1+3+1])
-                else:
-                    next_cell_state = cell_state
-                    y_ = tf.reshape(tf.layers.dense(
-                        cell_output,
-                        6*M+1,
-                        kernel_initializer=tf.contrib.layers.xavier_initializer(),
-                        reuse=tf.AUTO_REUSE
-                    ), [-1], name='y_')
-                    # End stroke
-                    e_ = tf.identity(y_[0:1], name='e_')
-                    # Mixture weight
-                    w_ = tf.identity(y_[1:M+1], name='w_')
-                    # Mean
-                    m1_ = tf.identity(y_[M+1:2*M+1], name='m1_')
-                    m2_ = tf.identity(y_[2*M+1:3*M+1], name='m2_')
-                    # Standard deviation
-                    s1_ = tf.identity(y_[3*M+1:4*M+1], name='s1_')
-                    s2_ = tf.identity(y_[4*M+1:5*M+1], name='s2_')
-                    # Correlation
-                    r_ = tf.identity(y_[5*M+1:6*M+1], name='r_')
+                def condition(t, x, *_):
+                    return tf.cond(
+                        tf.logical_or(self.is_training, self.is_validating),
+                        lambda: t < self.max_length,
+                        lambda: tf.logical_and(
+                            tf.cond(
+                                tf.equal(self.max_length, 0),
+                                lambda: tf.constant(True),
+                                lambda: t < self.max_length
+                            ),
+                            tf.reduce_any(x[:,0] < self.finish_line)
+                        )
+                    )
 
-                    e = tf.sigmoid(-e_, name='e')
-                    w = tf.nn.softmax(w_, name='w')
-                    m1 = m1_ #tf.identity(m1_, name='m1')
-                    m2 = m2_ #tf.identity(m2_, name='m2')
-                    s1 = tf.exp(s1_, name='s1')
-                    s2 = tf.exp(s2_, name='s2')
-                    r = tf.nn.tanh(r_, name='r')
-                    y = tf.concat([tf.reshape(v, [-1])
-                                   for v in [e, w, m1, m2, s1, s2, r]],
-                                  axis=-1,
-                                  name='y')
+                def forward(t, x, q, o_ta):
+                    h, q[0] = rnn(x, q[0])
+                    for d in range(1, self.num_layers):
+                        h, q[d] = rnn([x, h], q[d])
+                    y_ = tf.reshape(
+                        tf.layers.dense(
+                            d,
+                            6*M+2,
+                            kernel_initializer=init,
+                            reuse=tf.AUTO_REUSE
+                        )
+                    )
 
-                    bernoulli = tfd.Bernoulli(probs=e, dtype='float')
-                    mixture = tfd.MixtureSameFamily(
-                        mixture_distribution=tfd.Categorical(probs=w),
+                    # Whether to finish writing
+                    f = tf.sigmoid(-y_[:,0:1])
+                    e = tf.sigmoid(-y_[:,1:2])
+                    p = tf.nn.softmax(y_[:,2:M+2])
+                    m1 = y_[:,M+2:2*M+2]
+                    m2 = y_[:,2*M+2:3*M+2]
+                    s1 = tf.exp(y_[:,3*M+2:4*M+2])
+                    s2 = tf.exp(y_[:,4*M+2:5*M+2])
+                    r = tf.nn.tanh(y_[:,5*M+2:6*M+2])
+
+                    finish_pdf = tfd.Bernoulli(probs=tf.reshape(f, [self.batch_size]), dtype='float')
+                    lift_pdf = tfd.Bernoulli(probs=tf.reshape(e, [self.batch_size]), dtype='float')
+                    offset_pdf = tfd.MixtureSameFamily(
+                        mixture_distribution=tfd.Categorical(probs=p),
                         components_distribution=tfd.MultivariateNormalFullCovariance(
                             loc=tf.stack([m1, m2], axis=-1),
-                            covariance_matrix=tf.map_fn(
-                                lambda x: tf.reshape(tf.stack([
-                                    tf.square(x[0]),
-                                    x[0] * x[1] * x[2],
-                                    x[0] * x[1] * x[2],
-                                    tf.square(x[1])
-                                ]), [2, 2]),
-                                tf.stack([s1, s2, r], axis=-1)
-                            )
+                            covariance_matrix=tf.reshape(tf.stack(
+                                [tf.square(s1),
+                                 s1 * s2 * r,
+                                 s1 * s2 * r,
+                                 tf.square(s2)
+                                ],
+                                axis=-1
+                            ), [self.batch_size, M, 2, 2])
                         )
-                        # components_distribution=tfd.MultivariateNormalDiag(
-                        #     loc=tf.stack([m1, m2], axis=-1),
-                        #     scale_diag=tf.square(tf.stack([s1, s2], axis=-1))
-                        # )
                     )
 
-                    def call_sample():
-                        tf.assign(self.sampler.e, e)
-                        tf.assign(self.sampler.w, w)
-                        tf.assign(self.sampler.m1, m1)
-                        tf.assign(self.sampler.m2, m2)
-                        tf.assign(self.sampler.s1, s1)
-                        tf.assign(self.sampler.s2, s2)
-                        tf.assign(self.sampler.r, r)
-                        return self.sampler.sample
-
-                    stroke = tf.cond(
+                    compute_loss = x[:,0] < self.finish_line
+                    x = tf.cond(
                         tf.logical_or(self.is_training, self.is_validating),
-                        lambda: target_ta.read(time - 1),
-                        # lambda: tf.concat(
-                        #     [
-                        #         bernoulli.sample(seed=1),
-                        #         mixture.sample(seed=1)
-                        #     ],
-                        #     axis=-1
-                        # )
-                        lambda: call_sample()
+                        lambda: target_ta.read(t),
+                        lambda: tf.concat(
+                            [tf.where(f < self.finish_line,
+                                      tf.zeros([self.batch_size, 1], dtype='float'),
+                                      tf.ones([self.batch_size, 1], dtype='float')),
+                             tf.expand_dims(lift_pdf.sample(), 1),
+                             offset_pdf.sample()],
+                            axis=-1
+                        )
                     )
-                    stroke.set_shape([3])
 
-                    loss = -tf.log(tf.maximum(mixture.prob(stroke[1:]), 1e-10)) \
-                           - tf.log(bernoulli.prob(stroke[0]))
-                    loss /= tf.cast(self.length, 'float')
+                    loss = tf.where(
+                        compute_loss,
+                        -(
+                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1e20) +
+                            lift_pdf.log_prob(x[:,1]) +
+                            finish_pdf.log_prob(x[:,0])
+                        )  / tf.cast(self.target_length, 'float'),
+                        tf.zeros([self.batch_size])
+                    )
+                    loss = tf.reshape(loss, [self.batch_size, 1])
 
-                    next_input = tf.expand_dims(stroke, 0)
+                    sse = tf.where(
+                        compute_loss,
+                        tf.reduce_sum(
+                            tf.square(x - tf.concat([f, e, offset_pdf.mean()],
+                                                    axis=-1)),
+                            axis=-1
+                        ),
+                        tf.zeros([self.batch_size])
+                    )
+                    sse = tf.reshape(sse, [self.batch_size, 1])
 
-                    next_output = tf.concat([
-                        tf.expand_dims(y, 0),
-                        tf.expand_dims(stroke, 0),
-                        tf.expand_dims(loss, 0)
-                    ], axis=-1)
+                    o_ta = o_ta.write(t, tf.concat([
+                        x, loss, sse, f, e, p, m1, m2, s1, s2, r
+                    ], axis=-1))
 
-                elements_finished = (time >= self.length)
-                finished = tf.reduce_all(elements_finished)
+                    return t + 1, tf.reshape(x, [self.batch_size, 4]), q, o_ta
 
-                return elements_finished, next_input, next_cell_state, next_output, next_loop_state
+                time = tf.constant(0, dtype='int32')
 
-            outputs, states, _ = tf.nn.raw_rnn(cell, loop)
+                target_ta = tf.TensorArray(
+                    'float',
+                    size=self.max_length
+                ).unstack(tf.transpose(self.target, perm=[1,0,2]))
 
-            tf.reshape(outputs.stack(), [-1,6*M+1+3+1], name='output')
-            tf.identity(self.output[:,0:1], name='e')
-            tf.identity(self.output[:,1:M+1], name='w')
-            tf.identity(self.output[:,M+1:2*M+1], name='m1')
-            tf.identity(self.output[:,2*M+1:3*M+1], name='m2')
-            tf.identity(self.output[:,3*M+1:4*M+1], name='s1')
-            tf.identity(self.output[:,4*M+1:5*M+1], name='s2')
-            tf.identity(self.output[:,5*M+1:6*M+1], name='r')
-            tf.identity(self.output[:,0:6*M+1], name='y')
-            tf.add(self.output[:,-3:-1] * self.offset_scale, self.offset_mean, name='offset')
-            tf.concat([self.output[:,-4:-3], self.offset], axis=1, name='stroke')
+                output_ta = tf.while_loop(
+                    condition,
+                    forward,
+                    [time,
+                     tf.zeros([self.batch_size, 4], dtype='float'),
+                     [rnn.zero_state(self.batch_size, dtype='float')
+                      for d in range(self.num_layers)],
+                     tf.TensorArray('float', size=0, dynamic_size=True)
+                     ]
+                )[-1]
 
-            tf.reduce_sum(self.output[:, -1], name='loss')
+            tf.transpose(
+                tf.reshape(output_ta.stack(), [-1, self.batch_size, 4+1+1+6*M+2]),
+                perm=[1,0,2],
+                name='output'
+            )
+            tf.add(self.output[:,:,2:4] * self.offset_scale, self.offset_mean,
+                   name='stroke_offset')
+            tf.concat([self.output[:,:,0:2],
+                       self.stroke_offset], axis=-1,
+                      name='stroke')
+            tf.reduce_sum(self.output[:,:,4], name='loss')
+            tf.reduce_mean(self.output[:,:,5], name='sse')
 
             self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
-            # self.optimizer.minimize(self.loss, name='optimization')
             self.optimizer.apply_gradients(
-                [(tf.clip_by_value(g, -self.clip_threshold, self.clip_threshold), v)
+                [(tf.clip_by_norm(g, self.clip_threshold), v)
                  for g, v in self.optimizer.compute_gradients(self.loss)],
                 name='optimization'
             )
-
-    def _restore(self, mdldir, epoch):
-        ModelBase._restore(self, mdldir, epoch)
-        self.sampler = Sampler()
 
     def predict(self, x, train=False, **kwargs):
         session = tf.get_default_session()
         learning_rate = kwargs.get('learning_rate', 1e-4)
         clip_threshold = kwargs.get('clip_threshold', 100)
-        # self.randomizer = np.random.RandomState(seed)
+
         if train:
             return session.run(
-                [self.stroke, self.loss, self.optimization, self.output],
+                [self.stroke, self.loss, self.sse, self.optimization],
                 feed_dict={
                     self.target: x,
                     self.length: len(x),
@@ -394,12 +400,23 @@ class Conditional(ModelBase):
 
             tf.placeholder('float', [], name='learning_rate')
             tf.placeholder('float', [], name='clip_threshold')
-            tf.placeholder_with_default(tf.constant(0.0, 'float'),
-                                        shape=[],
-                                        name='sample_bias')
-            tf.placeholder_with_default(tf.constant(0.5, 'float'),
-                                        shape=[],
-                                        name='finish_line')
+            tf.placeholder_with_default(
+                tf.constant(1.0, 'float'),
+                shape=[],
+                name='keep_prob'
+            )
+
+            # For sampling
+            tf.placeholder_with_default(
+                tf.constant(0.0, 'float'),
+                shape=[],
+                name='sample_bias'
+            )
+            tf.placeholder_with_default(
+                tf.constant(0.5, 'float'),
+                shape=[],
+                name='finish_line'
+            )
 
             tf.constant(kwargs.get('offset_mean', 0.0),
                         dtype='float', name='offset_mean')
@@ -418,17 +435,9 @@ class Conditional(ModelBase):
             tf.identity(tf.shape(self.text)[0], name='batch_size')
 
             init = tf.contrib.layers.xavier_initializer()
-
-            target_ta = tf.TensorArray(
-                'float',
-                # size=self.batch_size
-                size=self.max_target_length
-            ).unstack(tf.transpose(self.target, perm=[1,0, 2]))
-
             with tf.variable_scope(
                 'rnn',
-                initializer=init,
-                reuse=tf.AUTO_REUSE
+                initializer=init
             ):
                 rnn1 = tf.contrib.rnn.GRUCell(
                     num_units=self.num_units,
@@ -453,15 +462,27 @@ class Conditional(ModelBase):
                         )
                     )
 
-                def forward(t, x, q1, q2, k, w, o_ta):
+                def forward(t, x, q1, q2, k, w, record):
+                    def dropout(v):
+                        return tf.nn.dropout(
+                            v,
+                            tf.cond(
+                                self.is_training,
+                                lambda: self.keep_prob,
+                                lambda: tf.constant(1.0, 'float')
+                            )
+                        )
+
                     h, q1 = rnn1(tf.concat([x, w], axis=-1), q1)
+                    h = dropout(h)
+
                     z_ = tf.reshape(tf.layers.dense(
                         h,
                         3*K,
-                        kernel_initializer=init,
-                        reuse=tf.AUTO_REUSE,
-                        name='z_'
+                        kernel_initializer=init
                     ), [-1, 3*K])
+                    z_ = dropout(z_)
+
                     a = tf.exp(z_[:,:K])
                     b = tf.exp(z_[:,K:2*K])
                     k += tf.exp(z_[:,2*K:])
@@ -491,19 +512,19 @@ class Conditional(ModelBase):
                     for d in range(self.num_layers):
                         h, q2[d] = rnn2(tf.concat([x, h, w], axis=-1),
                                         tf.reshape(q2[d], [-1, self.num_units]))
+                        h = dropout(h)
 
                     y_ = tf.reshape(tf.layers.dense(
                         h,
                         6*M+2,
-                        kernel_initializer=init,
-                        reuse=tf.AUTO_REUSE,
-                        name='y_'
+                        kernel_initializer=init
                     ), [-1, 6*M+2])
+                    y_ = dropout(y_)
 
                     # Whether to finish writing
                     f = tf.sigmoid(-y_[:,0:1])
                     e = tf.sigmoid(-y_[:,1:2])
-                    p = tf.nn.softmax(-y_[:,2:M+2] * (1.0 + self.sample_bias))
+                    p = tf.nn.softmax(y_[:,2:M+2] * (1.0 + self.sample_bias))
                     m1 = y_[:,M+2:2*M+2]
                     m2 = y_[:,2*M+2:3*M+2]
                     s1 = tf.exp(y_[:,3*M+2:4*M+2] - self.sample_bias)
@@ -540,17 +561,18 @@ class Conditional(ModelBase):
                             axis=-1
                         )
                     )
+                    x_ta = record.stroke.write(t, x)
 
                     loss = tf.where(
                         compute_loss,
                         -(
-                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), 1e-20) +
+                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1e20) +
                             lift_pdf.log_prob(x[:,1]) +
                             finish_pdf.log_prob(x[:,0])
                         )  / tf.cast(self.target_length, 'float'),
                         tf.zeros([self.batch_size])
                     )
-                    loss = tf.reshape(loss, [self.batch_size, 1])
+                    loss_ta = record.loss.write(t, loss)
 
                     sse = tf.where(
                         compute_loss,
@@ -561,17 +583,32 @@ class Conditional(ModelBase):
                         ),
                         tf.zeros([self.batch_size])
                     )
-                    sse = tf.reshape(sse, [self.batch_size, 1])
+                    sse_ta = record.sse.write(t, sse)
 
-                    o_ta = o_ta.write(t, tf.concat([
-                        x, loss, sse, f, e, p, m1, m2, s1, s2, r
+                    param_ta = record.param.write(t, tf.concat([
+                        f, e, p, m1, m2, s1, s2, r
                     ], axis=-1))
 
-                    return t + 1, tf.reshape(x, [self.batch_size, 4]), q1, q2, k, w, o_ta
+                    return t + 1, \
+                           tf.reshape(x, [self.batch_size, 4]), \
+                           q1, q2, \
+                           k, w, \
+                           Record(x_ta, loss_ta, sse_ta, param_ta)
 
                 time = tf.constant(0, dtype='int32')
 
-                output_ta = tf.while_loop(
+                target_ta = tf.TensorArray(
+                    'float',
+                    # size=self.batch_size
+                    size=self.max_target_length
+                ).unstack(tf.transpose(self.target, perm=[1,0,2]))
+
+                Record = namedtuple(
+                    'Record',
+                    ['stroke', 'loss', 'sse', 'param']
+                )
+
+                record = tf.while_loop(
                     condition,
                     forward,
                     [time,
@@ -581,22 +618,27 @@ class Conditional(ModelBase):
                       for d in range(self.num_layers)],
                      tf.zeros([self.batch_size, K], dtype='float'),
                      tf.zeros([self.batch_size, self.num_chars], dtype='float'),
-                     tf.TensorArray('float', size=0, dynamic_size=True)
-                     ]
+                     Record(*[
+                        tf.TensorArray('float', size=0, dynamic_size=True)
+                        for n in range(4)]
+                     )]
                 )[-1]
 
-            tf.transpose(
-                tf.reshape(output_ta.stack(), [-1, self.batch_size, 4+1+1+6*M+2]),
-                perm=[1,0,2],
-                name='output'
-            )
-            tf.add(self.output[:,:,2:4] * self.offset_scale, self.offset_mean,
-                   name='stroke_offset')
-            tf.concat([self.output[:,:,0:2],
-                       self.stroke_offset], axis=-1,
-                      name='stroke')
-            tf.reduce_sum(self.output[:,:,4], name='loss')
-            tf.reduce_mean(self.output[:,:,5], name='sse')
+            tf.transpose(record.param.stack(), perm=[1, 0, 2], name='param')
+
+            stroke = tf.transpose(record.stroke.stack(), perm=[1, 0, 2])
+
+            tf.concat([
+                stroke[:,:,:-2],
+                stroke[:,:,-2:] * self.offset_scale + self.offset_mean
+            ], axis=-1, name='stroke')
+
+            tf.transpose(record.loss.stack(), name='step_loss')
+            tf.reduce_sum(self.step_loss / tf.cast(self.batch_size, 'float'),
+                          name='loss')
+
+            tf.transpose(record.sse.stack(), name='step_sse')
+            tf.reduce_mean(self.step_sse, name='sse')
 
             self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
             self.optimizer.apply_gradients(
@@ -609,6 +651,7 @@ class Conditional(ModelBase):
         session = tf.get_default_session()
         learning_rate = kwargs.get('learning_rate', 1e-4)
         clip_threshold = kwargs.get('clip_threshold', 100)
+        keep_prob = kwargs.get('keep_prob', 1.0)
         batch_size = len(t)
 
         if train:
@@ -623,6 +666,7 @@ class Conditional(ModelBase):
                     self.is_validating: False,
                     self.learning_rate: learning_rate,
                     self.clip_threshold: clip_threshold,
+                    self.keep_prob: keep_prob
                 }
             )
         else:
@@ -676,14 +720,15 @@ def generate_unconditionally(random_seed=1, epoch=1):
     return stroke
 
 
-def generate_conditionally(text='welcome to lyrebird', random_seed=1, epoch=0,
+def generate_conditionally(text='welcome to lyrebird', random_seed=1,
+                           model='conditional', epoch=0,
                            sample_bias=0.0, finish_line=0.5):
     with tf.Session().as_default() as session:
-        model = Conditional(mdldir=path.join(MDLDEF, 'conditional'), epoch=epoch)
+        conditional = Conditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
         session.run(tf.tables_initializer())
-        stroke, = model.synth(np.array([c for c in text]),
-                              sample_bias=sample_bias,
-                              finish_line=finish_line)
+        stroke, = conditional.synth(np.array([c for c in text]),
+                                    sample_bias=sample_bias,
+                                    finish_line=finish_line)
     return stroke[0]
 
 

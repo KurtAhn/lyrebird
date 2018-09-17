@@ -19,24 +19,25 @@ from argparse import ArgumentParser
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('-m', '--output-mixture-size',
+    parser.add_argument('-M', '--output-mixture-size',
                         dest='M', type=int, default=20)
-    parser.add_argument('-k', '--window-mixture-size',
+    parser.add_argument('-K', '--window-mixture-size',
                         dest='K', type=int, default=10)
-    parser.add_argument('-n', '--num-units',
+    parser.add_argument('-N', '--num-units',
                         dest='N', type=int, default=400)
-    parser.add_argument('-l', '--num-layers',
+    parser.add_argument('-D', '--num-layers',
                         dest='D', type=int, default=1)
-    parser.add_argument('-r', '--learning-rate', type=float, default=1e-4)
-    parser.add_argument('-c', '--clip-threshold', type=float, default=100.0)
+    parser.add_argument('-r', '--learning-rate', dest='learning_rate', type=float, default=1e-4)
+    parser.add_argument('-c', '--clip-threshold', dest='clip_threshold', type=float, default=100.0)
+    parser.add_argument('-d', '--keep-prob', dest='keep_prob', type=float, default=1.0)
     parser.add_argument('-s', '--dont-standardize', dest='standardize', action='store_false')
     parser.add_argument('-b', '--batch-size', dest='batch_size', type=int, default=10)
-    parser.add_argument('-o', '--output', dest='output', default='conditional')
+    parser.add_argument('-m', '--model', dest='model', required=True)
 
     args = parser.parse_args()
 
     MDLDEF = path.join(path.dirname(path.realpath(__file__)), 'mdldef')
-    mdldir = path.join(MDLDEF, args.output)
+    mdldir = path.join(MDLDEF, args.model)
 
     with tf.Session().as_default() as session:
         strokes = read_strokes()
@@ -78,8 +79,10 @@ if __name__ == '__main__':
         session.run(tf.global_variables_initializer())
         session.run(tf.tables_initializer())
         saver = tf.train.Saver(max_to_keep=0)
-        summarizer = tf.summary.FileWriter(path.join(MDLDEF, 'train', 'conditional'),
-                                           graph=session.graph)
+        summarizer = tf.summary.FileWriter(
+            path.join(MDLDEF, 'train', args.model),
+            graph=session.graph
+        )
         model.save(saver, mdldir, 0, meta=True)
 
         epochs = 0
@@ -88,13 +91,15 @@ if __name__ == '__main__':
 
             session.run(train_iterator.initializer)
             train_report = Report(epochs, mode='t')
-
             while True:
                 try:
                     stroke, loss, sse, _ = model.predict(
-                        *session.run(train_example), train=True,
+                        *session.run(train_example),
+                        train=True,
                         learning_rate=args.learning_rate,
-                        clip_threshold=args.clip_threshold)
+                        clip_threshold=args.clip_threshold,
+                        keep_prob=args.keep_prob
+                    )
                     train_report.report(loss, sse)
                     if train_report.iterations % 10 == 0:
                         model.save(saver, mdldir, epochs)
@@ -104,7 +109,6 @@ if __name__ == '__main__':
 
             session.run(valid_iterator.initializer)
             valid_report = Report(epochs, mode='v')
-
             while True:
                 try:
                     stroke, loss, sse = model.predict(

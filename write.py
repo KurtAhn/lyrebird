@@ -19,10 +19,12 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--epoch', dest='epoch', type=int, required=True)
     parser.add_argument('-b', '--sample-bias', dest='sample_bias', type=float, default=0.0)
     parser.add_argument('-f', '--finish-line', dest='finish_line', type=float, default=0.5)
+    parser.add_argument('-m', '--model', dest='model', default='conditional')
     args = parser.parse_args()
 
     stroke = generate_conditionally(
         text=args.text,
+        model=args.model,
         epoch=args.epoch,
         sample_bias=args.sample_bias,
         finish_line=args.finish_line
