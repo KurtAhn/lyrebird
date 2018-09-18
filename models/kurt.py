@@ -7,8 +7,6 @@ if __name__ == '__main__':
     sys.path.insert(0, path.dirname(path.dirname(path.realpath(__file__))))
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-# from utils import plot_stroke
-
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -723,7 +721,7 @@ class Conditional(ModelBase):
         )
 
 MDLDEF = path.join(path.dirname(path.dirname(path.realpath(__file__))), 'mdldef')
-def generate_unconditionally(random_seed=1, epoch=0, model='unconditional', length=1000):
+def generate_unconditionally(random_seed=1, model='unconditional', epoch=0, length=1000):
     # Input:
     #   random_seed - integer
 
@@ -751,14 +749,4 @@ def generate_conditionally(text='welcome to lyrebird', random_seed=1,
                                     sample_bias=sample_bias,
                                     max_length=stroke_length)
     return stroke[0]
-
-
-# if __name__ == '__main__':
-#     # stroke = generate_unconditionally(epoch=int(sys.argv[1]))
-#     # print(np.count_nonzero(stroke[:,0]), len(stroke[:,0]))
-#     # # print(stroke[:20])
-#     # plot_stroke(stroke)
-#
-#     stroke = generate_conditionally(epoch=int(sys.argv[1]))
-#     print(stroke)
-#     plot_stroke(stroke)
+    
