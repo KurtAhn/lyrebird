@@ -112,7 +112,7 @@ if __name__ == '__main__':
             valid_report = Report(epochs, mode='v')
             while True:
                 try:
-                    stroke, loss, sse = model.predict(
+                    stroke, loss, sse, p = model.predict(
                         *session.run(valid_example), train=False
                     )
                     valid_report.report(loss, sse)
