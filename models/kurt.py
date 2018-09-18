@@ -203,22 +203,19 @@ class Unconditional(ModelBase):
             init = tf.contrib.layers.xavier_initializer()
             func = tf.nn.tanh
             with tf.variable_scope(
-                'rnn',
-                initializer=init
+                'rnn'
             ):
-                rnn = tf.contrib.rnn.GRUCell(
+                rnns = [tf.contrib.rnn.LSTMCell(
                     num_units=self.num_units,
-                    activation=func
-                )
-                rnn2 = tf.contrib.rnn.GRUCell(
-                    num_units=self.num_units,
-                    activation=func
-                )
+                    initializer=init,
+                    activation=func,
+                    state_is_tuple=True
+                ) for n in range(self.num_layers)]
 
                 def condition(t, x, *_):
                     return t < self.max_length
 
-                def forward(t, x, q, record):
+                def forward(t, x, qc, qh, record):
                     def dropout(v):
                         return tf.nn.dropout(
                             v,
@@ -229,11 +226,12 @@ class Unconditional(ModelBase):
                             )
                         )
 
-                    h, q[0] = rnn(x, q[0])
+                    h, (qc[0], qh[0]) = rnns[0](x, [qc[0], qh[0]])
                     h = dropout(h)
 
                     for d in range(1, self.num_layers):
-                        h, q[d] = rnn2(tf.concat([x, h], axis=-1), q[d])
+                        h, (qc[d], qh[d]) = rnns[d]\
+                                            (tf.concat([x, h], axis=-1), [qh[d], qh[d]])
                         h = dropout(h)
 
                     y_ = tf.reshape(
@@ -307,7 +305,7 @@ class Unconditional(ModelBase):
 
                     return t + 1, \
                            tf.reshape(x, [self.batch_size, STROKE_DIM]), \
-                           q, \
+                           qc, qh, \
                            Record(x_ta, loss_ta, sse_ta, param_ta)
 
                 time = tf.constant(0, dtype='int32')
@@ -317,13 +315,15 @@ class Unconditional(ModelBase):
                     size=self.max_length
                 ).unstack(tf.transpose(self.target, perm=[1,0,2]))
 
+                qch = [rnns[d].zero_state(self.batch_size, dtype='float')
+                       for d in range(self.num_layers)]
                 record = tf.while_loop(
                     condition,
                     forward,
                     [time,
                      tf.zeros([self.batch_size, STROKE_DIM], dtype='float'),
-                     [rnn.zero_state(self.batch_size, dtype='float')
-                      for d in range(self.num_layers)],
+                     [q[0] for q in qch],
+                     [q[1] for q in qch],
                      Record(*[
                         tf.TensorArray('float', size=0, dynamic_size=True)
                         for n in range(4)]
@@ -455,22 +455,20 @@ class Conditional(ModelBase):
             init = tf.contrib.layers.xavier_initializer()
             func = tf.nn.tanh
             with tf.variable_scope(
-                'rnn',
-                initializer=init
+                'rnn'
+                # initializer=init
             ):
-                rnn1 = tf.contrib.rnn.GRUCell(
+                rnns = [tf.contrib.rnn.LSTMCell(
                     num_units=self.num_units,
-                    activation=func
-                )
-                rnn2 = tf.contrib.rnn.GRUCell(
-                    num_units=self.num_units,
-                    activation=func
-                )
+                    initializer=init,
+                    activation=func,
+                    state_is_tuple=True
+                ) for n in range(self.num_layers)]
 
                 def condition(t, x, *_):
                     return t < self.max_target_length
 
-                def forward(t, x, q1, q2, k, w, record):
+                def forward(t, x, qc, qh, k, w, record):
                     def dropout(v):
                         return tf.nn.dropout(
                             v,
@@ -481,25 +479,25 @@ class Conditional(ModelBase):
                             )
                         )
 
-                    h, q1 = rnn1(tf.concat([x, w], axis=-1), q1)
+                    h, (qc[0], qh[0]) = rnns[0]\
+                                        (tf.concat([x, w], axis=-1), [qc[0], qh[0]])
                     h = dropout(h)
 
-                    # This is to account for the fact that there's about 25 strokes per character
+                    # This is to account for the fact that there's about 21.7 strokes per character
                     bias = np.zeros([3*K], dtype='float32')
-                    bias[2*K:] = np.log(1.0/25.0) * np.ones([K], dtype='float32')
+                    bias[2*K:] = np.log(1.0/21.7) * np.ones([K], dtype='float32')
                     z_ = tf.reshape(tf.layers.dense(
                         h,
                         3*K,
                         kernel_initializer=init,
                         bias_initializer=tf.constant_initializer(bias)
                     ), [-1, 3*K])
-                    # z_ = dropout(z_)
 
                     a = tf.exp(z_[:,:K])
                     b = tf.exp(z_[:,K:2*K])
                     k += tf.exp(z_[:,2*K:])
 
-                    u_range = tf.range(1, tf.cast(self.max_text_length, 'float') + 1)
+                    u_range = tf.range(tf.cast(self.max_text_length, 'float'))
                     u = tf.tile(
                         tf.reshape(
                             u_range,
@@ -543,9 +541,9 @@ class Conditional(ModelBase):
                         axis=1
                     )
 
-                    for d in range(self.num_layers):
-                        h, q2[d] = rnn2(tf.concat([x, h, w], axis=-1),
-                                        tf.reshape(q2[d], [-1, self.num_units]))
+                    for d in range(1, self.num_layers):
+                        h, (qc[d], qh[d]) = rnns[d]\
+                                            (tf.concat([x, h, w], axis=-1), [qc[d], qh[d]])
                         h = dropout(h)
 
                     y_ = tf.reshape(tf.layers.dense(
@@ -553,7 +551,6 @@ class Conditional(ModelBase):
                         self.num_params,
                         kernel_initializer=init
                     ), [-1, self.num_params])
-                    # y_ = dropout(y_)
 
                     p = tf.nn.softmax(y_[:,0:M] * (1.0 + self.sample_bias))
                     m1 = y_[:,M:2*M]
@@ -617,8 +614,7 @@ class Conditional(ModelBase):
 
                     return t + 1, \
                            tf.reshape(x, [self.batch_size, STROKE_DIM]), \
-                           q1, q2, \
-                           k, w, \
+                           qc, qh, k, w, \
                            Record(x_ta, loss_ta, sse_ta, param_ta)
 
                 time = tf.constant(0, dtype='int32')
@@ -628,14 +624,15 @@ class Conditional(ModelBase):
                     size=self.max_target_length
                 ).unstack(tf.transpose(self.target, perm=[1,0,2]))
 
+                qch = [rnns[d].zero_state(self.batch_size, dtype='float')
+                       for d in range(self.num_layers)]
                 record = tf.while_loop(
                     condition,
                     forward,
                     [time,
                      tf.zeros([self.batch_size, STROKE_DIM], dtype='float'),
-                     rnn1.zero_state(self.batch_size, dtype='float'),
-                     [rnn2.zero_state(self.batch_size, dtype='float')
-                      for d in range(self.num_layers)],
+                     [q[0] for q in qch],
+                     [q[1] for q in qch],
                      tf.zeros([self.batch_size, K], dtype='float'),
                      tf.zeros([self.batch_size, self.num_chars], dtype='float'),
                      Record(*[
@@ -712,7 +709,7 @@ class Conditional(ModelBase):
         max_length = kwargs.get('max_length', 1000)
 
         return session.run(
-            [self.stroke],
+            [self.stroke, self.param],
             feed_dict={
                 self.text: [t],
                 self.text_length: [len(t)],
@@ -750,7 +747,11 @@ def generate_conditionally(text='welcome to lyrebird', random_seed=1,
     with tf.Session().as_default() as session:
         conditional = Conditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
         session.run(tf.tables_initializer())
-        stroke, = conditional.synth(np.array([c for c in text]),
-                                    sample_bias=sample_bias,
-                                    max_length=stroke_length)
+        stroke, param = conditional.synth(np.array([c for c in text]),
+                                          sample_bias=sample_bias,
+                                          max_length=stroke_length)
+    from matplotlib import pyplot
+    pyplot.imshow(param[0,:,121:].T, vmax=1)
+    # pyplot.colorbar()
+    pyplot.show()
     return stroke[0]
