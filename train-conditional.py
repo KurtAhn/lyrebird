@@ -101,7 +101,7 @@ if __name__ == '__main__':
                         keep_prob=args.keep_prob
                     )
                     train_report.report(loss, sse)
-                    
+
                     if train_report.iterations % 10 == 0:
                         model.save(saver, mdldir, epochs)
                 except tf.errors.OutOfRangeError:

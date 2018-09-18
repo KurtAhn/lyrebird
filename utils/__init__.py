@@ -1,8 +1,8 @@
 import sys
 import numpy
-import PyQt5
-import matplotlib
-matplotlib.use('Agg')
+# import PyQt5
+# import matplotlib
+# matplotlib.use('Agg')
 from matplotlib import pyplot
 from collections import deque
 from time import time

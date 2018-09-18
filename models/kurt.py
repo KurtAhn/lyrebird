@@ -199,7 +199,7 @@ class Unconditional(ModelBase):
 
             tf.reduce_max(self.length, name='max_length')
             tf.identity(tf.shape(self.length)[0], name='batch_size')
-            
+
             init = tf.contrib.layers.xavier_initializer()
             func = tf.nn.tanh
             with tf.variable_scope(
@@ -228,14 +228,14 @@ class Unconditional(ModelBase):
                                 lambda: tf.constant(1.0, 'float')
                             )
                         )
-                    
+
                     h, q[0] = rnn(x, q[0])
                     h = dropout(h)
-                    
+
                     for d in range(1, self.num_layers):
                         h, q[d] = rnn2(tf.concat([x, h], axis=-1), q[d])
                         h = dropout(h)
-                    
+
                     y_ = tf.reshape(
                         tf.layers.dense(
                             h,
@@ -300,7 +300,7 @@ class Unconditional(ModelBase):
                         tf.zeros([self.batch_size])
                     )
                     sse_ta = record.sse.write(t, sse)
-                    
+
                     param_ta = record.param.write(t, tf.concat([
                         p, m1, m2, s1, s2, r, e
                     ], axis=-1))
@@ -389,7 +389,7 @@ class Unconditional(ModelBase):
 
     def synth(self, l, **kwargs):
         session = tf.get_default_session()
-        
+
         return session.run(
             [self.stroke],
             feed_dict={
@@ -399,8 +399,8 @@ class Unconditional(ModelBase):
                 self.is_validating: False
             }
         )
-        
-                
+
+
 class Conditional(ModelBase):
     def __init__(self, **kwargs):
         ModelBase.__init__(self, 'Conditional', **kwargs)
@@ -483,7 +483,7 @@ class Conditional(ModelBase):
 
                     h, q1 = rnn1(tf.concat([x, w], axis=-1), q1)
                     h = dropout(h)
-                    
+
                     # This is to account for the fact that there's about 25 strokes per character
                     bias = np.zeros([3*K], dtype='float32')
                     bias[2*K:] = np.log(1.0/25.0) * np.ones([K], dtype='float32')
@@ -724,7 +724,7 @@ class Conditional(ModelBase):
             }
         )
 
-        
+
 MDLDEF = path.join(path.dirname(path.dirname(path.realpath(__file__))), 'mdldef')
 def generate_unconditionally(random_seed=1, model='unconditional', epoch=0, length=1000):
     # Input:
@@ -750,8 +750,7 @@ def generate_conditionally(text='welcome to lyrebird', random_seed=1,
     with tf.Session().as_default() as session:
         conditional = Conditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
         session.run(tf.tables_initializer())
-        stroke = conditional.synth(np.array([c for c in text]),
-                                   sample_bias=sample_bias,
-                                   max_length=stroke_length)
+        stroke, = conditional.synth(np.array([c for c in text]),
+                                    sample_bias=sample_bias,
+                                    max_length=stroke_length)
     return stroke[0]
-    
