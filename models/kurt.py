@@ -483,11 +483,15 @@ class Conditional(ModelBase):
 
                     h, q1 = rnn1(tf.concat([x, w], axis=-1), q1)
                     h = dropout(h)
-
+                    
+                    # This is to account for the fact that there's about 25 strokes per character
+                    bias = np.zeros([3*K], dtype='float32')
+                    bias[2*K:] = np.log(1.0/25.0) * np.ones([K], dtype='float32')
                     z_ = tf.reshape(tf.layers.dense(
                         h,
                         3*K,
-                        kernel_initializer=init
+                        kernel_initializer=init,
+                        bias_initializer=tf.constant_initializer(bias)
                     ), [-1, 3*K])
                     # z_ = dropout(z_)
 
@@ -608,7 +612,7 @@ class Conditional(ModelBase):
                     sse_ta = record.sse.write(t, sse)
 
                     param_ta = record.param.write(t, tf.concat([
-                        p, m1, m2, s1, s2, r, e
+                        p, m1, m2, s1, s2, r, e, w
                     ], axis=-1))
 
                     return t + 1, \
@@ -691,7 +695,7 @@ class Conditional(ModelBase):
             )
         else:
             return session.run(
-                [self.stroke, self.loss, self.sse],
+                [self.stroke, self.loss, self.sse, self.param],
                 feed_dict={
                     self.text: t,
                     self.text_length: tl,
@@ -720,6 +724,7 @@ class Conditional(ModelBase):
             }
         )
 
+        
 MDLDEF = path.join(path.dirname(path.dirname(path.realpath(__file__))), 'mdldef')
 def generate_unconditionally(random_seed=1, model='unconditional', epoch=0, length=1000):
     # Input:
@@ -745,8 +750,8 @@ def generate_conditionally(text='welcome to lyrebird', random_seed=1,
     with tf.Session().as_default() as session:
         conditional = Conditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
         session.run(tf.tables_initializer())
-        stroke, = conditional.synth(np.array([c for c in text]),
-                                    sample_bias=sample_bias,
-                                    max_length=stroke_length)
+        stroke = conditional.synth(np.array([c for c in text]),
+                                   sample_bias=sample_bias,
+                                   max_length=stroke_length)
     return stroke[0]
     

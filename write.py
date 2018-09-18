@@ -20,6 +20,7 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--epoch', dest='epoch', type=int, required=True)
     parser.add_argument('-b', '--sample-bias', dest='sample_bias', type=float, default=0.0)
     parser.add_argument('-l', '--stroke-length', dest='stroke_length', type=int, default=None)
+    parser.add_argument('-o', '--output', dest='output', default=None)
     args = parser.parse_args()
 
     stroke = generate_conditionally(
@@ -29,6 +30,7 @@ if __name__ == '__main__':
         sample_bias=args.sample_bias,
         stroke_length=args.stroke_length or len(args.text.replace(' ', '')) * 30
     )
+    
     print('Stroke length: {}'.format(len(stroke)))
 
-    plot_stroke(stroke)
+    plot_stroke(stroke, save_name=args.output)
