@@ -4,14 +4,15 @@ from os import path
 
 
 DATA_PATH = path.dirname(path.realpath(__file__))
+STROKE_DIM = 3
 
 def read_strokes(sort=True):
     with open(path.join(DATA_PATH, 'strokes.npy'), 'rb') as f:
         strokes = np.load(f, encoding='bytes')
-    for n in range(len(strokes)):
-        finish = np.zeros([len(strokes[n]), 1])
-        finish[-1,0] = 1.0
-        strokes[n] = np.concatenate([finish, strokes[n]], axis=-1)
+    # for n in range(len(strokes)):
+    #     finish = np.zeros([len(strokes[n]), 1])
+    #     finish[-1,0] = 1.0
+    #     strokes[n] = np.concatenate([finish, strokes[n]], axis=-1)
     return strokes
 
 
@@ -20,7 +21,7 @@ def sort_strokes(strokes):
 
 
 def standardize_strokes(strokes):
-    flattened = np.concatenate([s.reshape(-1, 4) for s in strokes])
+    flattened = np.concatenate([s.reshape(-1, STROKE_DIM) for s in strokes])
     offset_mean = np.mean(flattened[:,-2:], axis=0)
     offset_scale = np.std(flattened[:,-2:], axis=0)
 
@@ -57,8 +58,7 @@ def unconditional_dataset(strokes, batch_size=1):
         (s_ds, sl_ds)
     ).padded_batch(
         batch_size,
-        ([None, 4], []),
-        (1.0, 0)
+        ([None, STROKE_DIM], [])
     )
 
 
@@ -83,6 +83,5 @@ def conditional_dataset(text, strokes, batch_size=1):
         (t_ds, tl_ds, s_ds, sl_ds)
     ).padded_batch(
         batch_size,
-        ([None], [], [None, 4], []),
-        ('unk', 0, 1.0, 0)
+        ([None], [], [None, STROKE_DIM], []),
     )

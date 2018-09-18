@@ -16,10 +16,10 @@ from argparse import ArgumentParser
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('text')
+    parser.add_argument('-m', '--model', dest='model', default='conditional')
     parser.add_argument('-e', '--epoch', dest='epoch', type=int, required=True)
     parser.add_argument('-b', '--sample-bias', dest='sample_bias', type=float, default=0.0)
-    parser.add_argument('-f', '--finish-line', dest='finish_line', type=float, default=0.5)
-    parser.add_argument('-m', '--model', dest='model', default='conditional')
+    parser.add_argument('-l', '--stroke-length', dest='stroke_length', type=int, default=None)
     args = parser.parse_args()
 
     stroke = generate_conditionally(
@@ -27,16 +27,8 @@ if __name__ == '__main__':
         model=args.model,
         epoch=args.epoch,
         sample_bias=args.sample_bias,
-        finish_line=args.finish_line
+        stroke_length=args.stroke_length or len(args.text.replace(' ', '')) * 30
     )
-
     print('Stroke length: {}'.format(len(stroke)))
-    # plot_stroke(np.concatenate([
-    #     stroke[:,1:],
-    #     np.array([
-    #         [0.0, 0.0, 0.0],
-    #         [1.0, 0.0, 0.0],
-    #     ])
-    # ]))
-    print(stroke)
-    plot_stroke(stroke[:,1:])
+
+    plot_stroke(stroke)

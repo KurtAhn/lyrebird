@@ -16,6 +16,14 @@ tfd = tfp.distributions
 
 from collections import namedtuple
 
+from data import STROKE_DIM
+
+
+Record = namedtuple(
+    'Record',
+    ['stroke', 'loss', 'sse', 'param']
+)
+
 
 class ModelBase:
     """
@@ -112,7 +120,7 @@ class Sampler(ModelBase):
 
     def _create(self, **kwargs):
         self._randomizer = np.random.RandomState(None)
-        M = self.num_components = kwargs.get('num_components', None)
+        M = self.mixture_size = kwargs.get('mixture_size', None)
         with tf.name_scope(self.name) as scope:
             def sample(e, w, m1, m2, s1, s2, r):
                 x0 = self.randomizer.binomial(1, e, 1).astype('float32')[0]
@@ -205,18 +213,7 @@ class Unconditional(ModelBase):
                 )
 
                 def condition(t, x, *_):
-                    return tf.cond(
-                        tf.logical_or(self.is_training, self.is_validating),
-                        lambda: t < self.max_length,
-                        lambda: tf.logical_and(
-                            tf.cond(
-                                tf.equal(self.max_length, 0),
-                                lambda: tf.constant(True),
-                                lambda: t < self.max_length
-                            ),
-                            tf.reduce_any(x[:,0] < self.finish_line)
-                        )
-                    )
+                    return t < self.max_length
 
                 def forward(t, x, q, o_ta):
                     h, q[0] = rnn(x, q[0])
@@ -225,23 +222,20 @@ class Unconditional(ModelBase):
                     y_ = tf.reshape(
                         tf.layers.dense(
                             d,
-                            6*M+2,
+                            self.num_params,
                             kernel_initializer=init,
                             reuse=tf.AUTO_REUSE
                         )
                     )
 
-                    # Whether to finish writing
-                    f = tf.sigmoid(-y_[:,0:1])
-                    e = tf.sigmoid(-y_[:,1:2])
-                    p = tf.nn.softmax(y_[:,2:M+2])
-                    m1 = y_[:,M+2:2*M+2]
-                    m2 = y_[:,2*M+2:3*M+2]
-                    s1 = tf.exp(y_[:,3*M+2:4*M+2])
-                    s2 = tf.exp(y_[:,4*M+2:5*M+2])
-                    r = tf.nn.tanh(y_[:,5*M+2:6*M+2])
+                    p = tf.nn.softmax(y_[:,0:M])
+                    m1 = y_[:,M:2*M]
+                    m2 = y_[:,2*M:3*M]
+                    s1 = tf.exp(y_[:,3*M:4*M])
+                    s2 = tf.exp(y_[:,4*M:5*M])
+                    r = tf.nn.tanh(y_[:,5*M:6*M])
+                    e = tf.sigmoid(-y_[:,6*M:6*M+1])
 
-                    finish_pdf = tfd.Bernoulli(probs=tf.reshape(f, [self.batch_size]), dtype='float')
                     lift_pdf = tfd.Bernoulli(probs=tf.reshape(e, [self.batch_size]), dtype='float')
                     offset_pdf = tfd.MixtureSameFamily(
                         mixture_distribution=tfd.Categorical(probs=p),
@@ -258,7 +252,6 @@ class Unconditional(ModelBase):
                         )
                     )
 
-                    compute_loss = x[:,0] < self.finish_line
                     x = tf.cond(
                         tf.logical_or(self.is_training, self.is_validating),
                         lambda: target_ta.read(t),
@@ -272,12 +265,12 @@ class Unconditional(ModelBase):
                         )
                     )
 
+                    compute_loss = self.length
                     loss = tf.where(
                         compute_loss,
                         -(
                             tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1e20) +
-                            lift_pdf.log_prob(x[:,1]) +
-                            finish_pdf.log_prob(x[:,0])
+                            lift_pdf.log_prob(x[:,0])
                         )  / tf.cast(self.target_length, 'float'),
                         tf.zeros([self.batch_size])
                     )
@@ -286,8 +279,7 @@ class Unconditional(ModelBase):
                     sse = tf.where(
                         compute_loss,
                         tf.reduce_sum(
-                            tf.square(x - tf.concat([f, e, offset_pdf.mean()],
-                                                    axis=-1)),
+                            tf.square(x - tf.concat([e, offset_pdf.mean()], axis=-1)),
                             axis=-1
                         ),
                         tf.zeros([self.batch_size])
@@ -295,10 +287,13 @@ class Unconditional(ModelBase):
                     sse = tf.reshape(sse, [self.batch_size, 1])
 
                     o_ta = o_ta.write(t, tf.concat([
-                        x, loss, sse, f, e, p, m1, m2, s1, s2, r
+                        x, loss, sse, p, m1, m2, s1, s2, r, e
                     ], axis=-1))
 
-                    return t + 1, tf.reshape(x, [self.batch_size, 4]), q, o_ta
+                    return t + 1, \
+                           tf.reshape(x, [self.batch_size, STROKE_DIM]), \
+                           q, \
+                           Record(x_ta, loss_ta, sse_ta, param_ta)
 
                 time = tf.constant(0, dtype='int32')
 
@@ -311,25 +306,31 @@ class Unconditional(ModelBase):
                     condition,
                     forward,
                     [time,
-                     tf.zeros([self.batch_size, 4], dtype='float'),
+                     tf.zeros([self.batch_size, STROKE_DIM], dtype='float'),
                      [rnn.zero_state(self.batch_size, dtype='float')
                       for d in range(self.num_layers)],
-                     tf.TensorArray('float', size=0, dynamic_size=True)
-                     ]
+                     Record(*[
+                        tf.TensorArray('float', size=0, dynamic_size=True)
+                        for n in range(4)]
+                     )]
                 )[-1]
 
-            tf.transpose(
-                tf.reshape(output_ta.stack(), [-1, self.batch_size, 4+1+1+6*M+2]),
-                perm=[1,0,2],
-                name='output'
-            )
-            tf.add(self.output[:,:,2:4] * self.offset_scale, self.offset_mean,
-                   name='stroke_offset')
-            tf.concat([self.output[:,:,0:2],
-                       self.stroke_offset], axis=-1,
-                      name='stroke')
-            tf.reduce_sum(self.output[:,:,4], name='loss')
-            tf.reduce_mean(self.output[:,:,5], name='sse')
+            # FIX ALL THIS
+            tf.transpose(record.param.stack(), perm=[1,0,2], name='param')
+
+            stroke = tf.transpose(record.stroke.stack(), perm=[1,0,2])
+
+            tf.concat([
+                stroke[:,:,:-2],
+                stroke[:,:,-2:] * self.offset_scale + self.offset_mean
+            ], axis=-1, name='stroke')
+
+            tf.transpose(record.loss.stack(), name='step_loss')
+            tf.reduce_sum(self.step_loss / tf.cast(self.batch_size, 'float'),
+                          name='loss')
+
+            tf.transpose(record.sse.stack(), name='step_sse')
+            tf.reduce_mean(self.step_sse, name='sse')
 
             self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
             self.optimizer.apply_gradients(
@@ -337,6 +338,10 @@ class Unconditional(ModelBase):
                  for g, v in self.optimizer.compute_gradients(self.loss)],
                 name='optimization'
             )
+
+    @property
+    def num_params(self):
+        return self.mixture_size * 6 + 1
 
     def predict(self, x, train=False, **kwargs):
         session = tf.get_default_session()
@@ -393,7 +398,7 @@ class Conditional(ModelBase):
             tf.placeholder('string', [None, None], name='text')
 
             tf.placeholder('int32', [None], name='target_length')
-            tf.placeholder('float', [None, None, 4], name='target')
+            tf.placeholder('float', [None, None, STROKE_DIM], name='target')
 
             tf.placeholder('bool', [], name='is_training')
             tf.placeholder('bool', [], name='is_validating')
@@ -411,11 +416,6 @@ class Conditional(ModelBase):
                 tf.constant(0.0, 'float'),
                 shape=[],
                 name='sample_bias'
-            )
-            tf.placeholder_with_default(
-                tf.constant(0.5, 'float'),
-                shape=[],
-                name='finish_line'
             )
 
             tf.constant(kwargs.get('offset_mean', 0.0),
@@ -435,32 +435,22 @@ class Conditional(ModelBase):
             tf.identity(tf.shape(self.text)[0], name='batch_size')
 
             init = tf.contrib.layers.xavier_initializer()
+            func = tf.nn.tanh
             with tf.variable_scope(
                 'rnn',
                 initializer=init
             ):
                 rnn1 = tf.contrib.rnn.GRUCell(
                     num_units=self.num_units,
-                    activation=tf.nn.tanh
+                    activation=func
                 )
                 rnn2 = tf.contrib.rnn.GRUCell(
                     num_units=self.num_units,
-                    activation=tf.nn.tanh
+                    activation=func
                 )
 
                 def condition(t, x, *_):
-                    return tf.cond(
-                        tf.logical_or(self.is_training, self.is_validating),
-                        lambda: t < self.max_target_length,
-                        lambda: tf.logical_and(
-                            tf.cond(
-                                tf.equal(self.max_target_length, 0),
-                                lambda: tf.constant(True),
-                                lambda: t < self.max_target_length
-                            ),
-                            tf.reduce_any(x[:,0] < self.finish_line)
-                        )
-                    )
+                    return t < self.max_target_length
 
                 def forward(t, x, q1, q2, k, w, record):
                     def dropout(v):
@@ -481,20 +471,42 @@ class Conditional(ModelBase):
                         3*K,
                         kernel_initializer=init
                     ), [-1, 3*K])
-                    z_ = dropout(z_)
+                    # z_ = dropout(z_)
 
                     a = tf.exp(z_[:,:K])
                     b = tf.exp(z_[:,K:2*K])
                     k += tf.exp(z_[:,2*K:])
 
+                    u_range = tf.range(1, tf.cast(self.max_text_length, 'float') + 1)
                     u = tf.tile(
                         tf.reshape(
-                            tf.range(1, tf.cast(self.max_text_length, 'float') + 1),
+                            u_range,
                             [1, 1, -1]
                         ), [self.batch_size, K, 1])
                     c = tf.one_hot(
                         character_table.lookup(self.text),
                         self.num_chars
+                    )
+                    mask = tf.tile(
+                        tf.reshape(
+                            u_range,
+                            [1, -1, 1]
+                        ),
+                        [self.batch_size, 1, self.num_chars]
+                    )
+                    c = tf.where(
+                        mask <= tf.expand_dims(
+                            tf.tile(
+                                tf.expand_dims(
+                                    tf.cast(self.text_length, 'float'),
+                                    -1
+                                ),
+                                [1, self.max_text_length]
+                            ),
+                            -1
+                        ),
+                        c,
+                        tf.zeros_like(mask)
                     )
                     phi = tf.reduce_sum(
                         tf.expand_dims(a, -1) * \
@@ -516,22 +528,19 @@ class Conditional(ModelBase):
 
                     y_ = tf.reshape(tf.layers.dense(
                         h,
-                        6*M+2,
+                        self.num_params,
                         kernel_initializer=init
-                    ), [-1, 6*M+2])
-                    y_ = dropout(y_)
+                    ), [-1, self.num_params])
+                    # y_ = dropout(y_)
 
-                    # Whether to finish writing
-                    f = tf.sigmoid(-y_[:,0:1])
-                    e = tf.sigmoid(-y_[:,1:2])
-                    p = tf.nn.softmax(y_[:,2:M+2] * (1.0 + self.sample_bias))
-                    m1 = y_[:,M+2:2*M+2]
-                    m2 = y_[:,2*M+2:3*M+2]
-                    s1 = tf.exp(y_[:,3*M+2:4*M+2] - self.sample_bias)
-                    s2 = tf.exp(y_[:,4*M+2:5*M+2] - self.sample_bias)
-                    r = tf.nn.tanh(y_[:,5*M+2:6*M+2])
+                    p = tf.nn.softmax(y_[:,0:M] * (1.0 + self.sample_bias))
+                    m1 = y_[:,M:2*M]
+                    m2 = y_[:,2*M:3*M]
+                    s1 = tf.exp(y_[:,3*M:4*M] - self.sample_bias)
+                    s2 = tf.exp(y_[:,4*M:5*M] - self.sample_bias)
+                    r = tf.nn.tanh(y_[:,5*M:6*M])
+                    e = tf.sigmoid(-y_[:,6*M:6*M+1])
 
-                    finish_pdf = tfd.Bernoulli(probs=tf.reshape(f, [self.batch_size]), dtype='float')
                     lift_pdf = tfd.Bernoulli(probs=tf.reshape(e, [self.batch_size]), dtype='float')
                     offset_pdf = tfd.MixtureSameFamily(
                         mixture_distribution=tfd.Categorical(probs=p),
@@ -548,27 +557,23 @@ class Conditional(ModelBase):
                         )
                     )
 
-                    compute_loss = x[:,0] < self.finish_line
                     x = tf.cond(
                         tf.logical_or(self.is_training, self.is_validating),
                         lambda: target_ta.read(t),
                         lambda: tf.concat(
-                            [tf.where(f < self.finish_line,
-                                      tf.zeros([self.batch_size, 1], dtype='float'),
-                                      tf.ones([self.batch_size, 1], dtype='float')),
-                             tf.expand_dims(lift_pdf.sample(), 1),
+                            [tf.expand_dims(lift_pdf.sample(), 1),
                              offset_pdf.sample()],
                             axis=-1
                         )
                     )
                     x_ta = record.stroke.write(t, x)
 
+                    compute_loss = t < self.target_length
                     loss = tf.where(
                         compute_loss,
                         -(
-                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1e20) +
-                            lift_pdf.log_prob(x[:,1]) +
-                            finish_pdf.log_prob(x[:,0])
+                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -40) +
+                            lift_pdf.log_prob(x[:,0])
                         )  / tf.cast(self.target_length, 'float'),
                         tf.zeros([self.batch_size])
                     )
@@ -577,8 +582,7 @@ class Conditional(ModelBase):
                     sse = tf.where(
                         compute_loss,
                         tf.reduce_sum(
-                            tf.square(x - tf.concat([f, e, offset_pdf.mean()],
-                                                    axis=-1)),
+                            tf.square(x - tf.concat([e, offset_pdf.mean()], axis=-1)),
                             axis=-1
                         ),
                         tf.zeros([self.batch_size])
@@ -586,11 +590,11 @@ class Conditional(ModelBase):
                     sse_ta = record.sse.write(t, sse)
 
                     param_ta = record.param.write(t, tf.concat([
-                        f, e, p, m1, m2, s1, s2, r
+                        p, m1, m2, s1, s2, r, e
                     ], axis=-1))
 
                     return t + 1, \
-                           tf.reshape(x, [self.batch_size, 4]), \
+                           tf.reshape(x, [self.batch_size, STROKE_DIM]), \
                            q1, q2, \
                            k, w, \
                            Record(x_ta, loss_ta, sse_ta, param_ta)
@@ -599,20 +603,14 @@ class Conditional(ModelBase):
 
                 target_ta = tf.TensorArray(
                     'float',
-                    # size=self.batch_size
                     size=self.max_target_length
                 ).unstack(tf.transpose(self.target, perm=[1,0,2]))
-
-                Record = namedtuple(
-                    'Record',
-                    ['stroke', 'loss', 'sse', 'param']
-                )
 
                 record = tf.while_loop(
                     condition,
                     forward,
                     [time,
-                     tf.zeros([self.batch_size, 4], dtype='float'),
+                     tf.zeros([self.batch_size, STROKE_DIM], dtype='float'),
                      rnn1.zero_state(self.batch_size, dtype='float'),
                      [rnn2.zero_state(self.batch_size, dtype='float')
                       for d in range(self.num_layers)],
@@ -647,6 +645,10 @@ class Conditional(ModelBase):
                 name='optimization'
             )
 
+    @property
+    def num_params(self):
+        return self.output_mixture_size * 6 + 1
+
     def predict(self, t, tl, x, xl, train=False, **kwargs):
         session = tf.get_default_session()
         learning_rate = kwargs.get('learning_rate', 1e-4)
@@ -656,7 +658,7 @@ class Conditional(ModelBase):
 
         if train:
             return session.run(
-                [self.stroke, self.loss, self.sse, self.optimization],
+                [self.stroke, self.loss, self.sse, self.step_loss, self.step_sse, self.param, self.optimization],
                 feed_dict={
                     self.text: t,
                     self.text_length: tl,
@@ -685,7 +687,6 @@ class Conditional(ModelBase):
     def synth(self, t, **kwargs):
         session = tf.get_default_session()
         sample_bias = kwargs.get('sample_bias', 0.0)
-        finish_line = kwargs.get('finish_line', 0.5)
         max_length = kwargs.get('max_length', 1000)
 
         return session.run(
@@ -693,12 +694,11 @@ class Conditional(ModelBase):
             feed_dict={
                 self.text: [t],
                 self.text_length: [len(t)],
-                self.target: np.zeros([1,1,4], 'float32'),
+                self.target: np.zeros([1,1,STROKE_DIM], 'float32'),
                 self.target_length: [max_length],
                 self.is_training: False,
                 self.is_validating: False,
                 self.sample_bias: sample_bias,
-                self.finish_line: finish_line
             }
         )
 
@@ -722,13 +722,14 @@ def generate_unconditionally(random_seed=1, epoch=1):
 
 def generate_conditionally(text='welcome to lyrebird', random_seed=1,
                            model='conditional', epoch=0,
-                           sample_bias=0.0, finish_line=0.5):
+                           sample_bias=0.0,
+                           stroke_length=1000):
     with tf.Session().as_default() as session:
         conditional = Conditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
         session.run(tf.tables_initializer())
         stroke, = conditional.synth(np.array([c for c in text]),
                                     sample_bias=sample_bias,
-                                    finish_line=finish_line)
+                                    max_length=stroke_length)
     return stroke[0]
 
 

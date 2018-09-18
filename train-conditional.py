@@ -93,7 +93,7 @@ if __name__ == '__main__':
             train_report = Report(epochs, mode='t')
             while True:
                 try:
-                    stroke, loss, sse, _ = model.predict(
+                    stroke, loss, sse, sl, ss, p, _ = model.predict(
                         *session.run(train_example),
                         train=True,
                         learning_rate=args.learning_rate,
@@ -101,6 +101,9 @@ if __name__ == '__main__':
                         keep_prob=args.keep_prob
                     )
                     train_report.report(loss, sse)
+                    # for t in range(50:80):
+                        # print(stroke[0,t], sl[0,t], ss[0,t], p[0,t,:])
+                    # quit()
                     if train_report.iterations % 10 == 0:
                         model.save(saver, mdldir, epochs)
                 except tf.errors.OutOfRangeError:
