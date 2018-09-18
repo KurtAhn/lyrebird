@@ -21,22 +21,23 @@ from argparse import ArgumentParser
 if __name__ == '__main__':
     parser = ArgumentParser()
 
-    parser.add_argument('-m', '--mixture-size',
+    parser.add_argument('-M', '--mixture-size',
                         dest='M', type=int, default=20)
-    parser.add_argument('-n', '--num-units',
+    parser.add_argument('-N', '--num-units',
                         dest='N', type=int, default=400)
-    parser.add_argument('-l', '--num-layers',
+    parser.add_argument('-D', '--num-layers',
                         dest='D', type=int, default=1)
     parser.add_argument('-r', '--learning-rate', type=float, default=1e-4)
     parser.add_argument('-c', '--clip-threshold', type=float, default=100.0)
+    parser.add_argument('-d', '--keep-prob', dest='keep_prob', type=float, default=1.0)
     parser.add_argument('-s', '--dont-standardize', dest='standardize', action='store_false')
     parser.add_argument('-b', '--batch-size', dest='batch_size', type=int, default=10)
-    parser.add_argument('-o', '--output', dest='output', default='unconditional')
+    parser.add_argument('-m', '--model', dest='model', required=True)
 
     args = parser.parse_args()
 
     MDLDEF = path.join(path.dirname(path.realpath(__file__)), 'mdldef')
-    mdldir = path.join(MDLDEF, args.output)
+    mdldir = path.join(MDLDEF, args.model)
 
     with tf.Session().as_default() as session:
         strokes = read_strokes()
@@ -68,12 +69,14 @@ if __name__ == '__main__':
             offset_mean=offset_mean,
             offset_scale=offset_scale
         )
+        
         session.run(tf.global_variables_initializer())
         saver = tf.train.Saver(max_to_keep=0)
         summarizer = tf.summary.FileWriter(
-            path.join(MDLDEF, 'train', args.output),
+            path.join(MDLDEF, 'train', args.model),
             graph=session.graph
         )
+        model.save(saver, mdldir, 0, meta=True)
 
         epochs = 0
         while True:
@@ -81,62 +84,33 @@ if __name__ == '__main__':
 
             session.run(train_iterator.initializer)
             train_report = Report(epochs, mode='t')
-
-            iterations = 0
-            total_loss = 0.0
             while True:
                 try:
-                    stroke, loss, _ = model.predict(
-                        session.run(train_example), train=True,
+                    stroke, loss, sse, _ = model.predict(
+                        *session.run(train_example),
+                        train=True,
                         learning_rate=args.learning_rate,
-                        clip_threshold=args.clip_threshold)
-                    total_loss += loss
-                    iterations += 1
-                    # print(output[0,:], file=sys.stderr)
-                    # quit()
-                    print('\r\x1b[0;{m};40m'
-                           'Epoch: {e}'
-                           ' Iteration: {i}'
-                           ' Loss: {l:.3e}'
-                           ' Avg: {a:.3e}'
-                           # ' It./s: {s:.3f}'
-                           '\x1b[0m'.format(
-                            m=37,
-                            e=epochs,
-                            i=iterations,
-                            l=loss,
-                            a=total_loss / iterations
-                            ), file=sys.stderr, end='')
+                        clip_threshold=args.clip_threshold,
+                        keep_prob=args.keep_prob
+                    )
+                    train_report.report(loss, sse)
+                    if train_report.iterations % 10 == 0:
+                        model.save(saver, mdldir, epochs)
                 except tf.errors.OutOfRangeError:
                     break
             print('', file=sys.stderr)
 
             session.run(valid_iterator.initializer)
-            iterations = 0
-            total_loss = 0.0
+            valid_report = Report(epochs, mode='v')
             while True:
                 try:
-                    stroke, loss = model.predict(
-                        session.run(valid_example), train=False,
-                        learning_rate=args.learning_rate)
-                    total_loss += loss
-                    iterations += 1
-                    # print(w, file=sys.stderr)
-                    print('\r\x1b[0;{m};40m'
-                           'Epoch: {e}'
-                           ' Iteration: {i}'
-                           ' Loss: {l:.3e}'
-                           ' Avg: {a:.3e}'
-                           # ' It./s: {s:.3f}'
-                           '\x1b[0m'.format(
-                            m=33,
-                            e=epochs,
-                            i=iterations,
-                            l=loss,
-                            a=total_loss / iterations
-                            ), file=sys.stderr, end='')
+                    stroke, loss, sse = model.predict(
+                        session.run(valid_example),
+                        train=False
+                    )
+                    valid_report.report(loss, sse)
                 except tf.errors.OutOfRangeError:
                     break
             print('', file=sys.stderr)
 
-            model.save(saver, '../mdldef/unconditional', epochs)
+            #model.save(saver, '../mdldef/unconditional', epochs)

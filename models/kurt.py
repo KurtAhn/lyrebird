@@ -180,7 +180,7 @@ class Unconditional(ModelBase):
             # Number of strokes to output
             tf.placeholder('int32', [None], name='length')
             # Target sequence
-            tf.placeholder('float', [None, None, 4], name='target')
+            tf.placeholder('float', [None, None, STROKE_DIM], name='target')
 
             # Operation mode: training or validating
             tf.placeholder('bool', [], name='is_training')
@@ -190,9 +190,9 @@ class Unconditional(ModelBase):
             tf.placeholder('float', [], name='learning_rate')
             tf.placeholder('float', [], name='clip_threshold')
             tf.placeholder_with_default(
-                tf.constant(0.5, 'float'),
+                tf.constant(1.0, 'float'),
                 shape=[],
-                name='finish_line'
+                name='keep_prob'
             )
 
             # Standardization
@@ -201,31 +201,50 @@ class Unconditional(ModelBase):
 
             tf.reduce_max(self.length, name='max_length')
             tf.identity(tf.shape(self.length)[0], name='batch_size')
-
+            
+            init = tf.contrib.layers.xavier_initializer()
+            func = tf.nn.tanh
             with tf.variable_scope(
                 'rnn',
-                initializer=tf.contrib.layers.xavier_initializer(),
-                reuse=tf.AUTO_REUSE
+                initializer=init
             ):
                 rnn = tf.contrib.rnn.GRUCell(
                     num_units=self.num_units,
-                    activation=tf.nn.tanh
+                    activation=func
+                )
+                rnn2 = tf.contrib.rnn.GRUCell(
+                    num_units=self.num_units,
+                    activation=func
                 )
 
                 def condition(t, x, *_):
                     return t < self.max_length
 
-                def forward(t, x, q, o_ta):
+                def forward(t, x, q, record):
+                    def dropout(v):
+                        return tf.nn.dropout(
+                            v,
+                            tf.cond(
+                                self.is_training,
+                                lambda: self.keep_prob,
+                                lambda: tf.constant(1.0, 'float')
+                            )
+                        )
+                    
                     h, q[0] = rnn(x, q[0])
+                    h = dropout(h)
+                    
                     for d in range(1, self.num_layers):
-                        h, q[d] = rnn([x, h], q[d])
+                        h, q[d] = rnn2(tf.concat([x, h], axis=-1), q[d])
+                        h = dropout(h)
+                    
                     y_ = tf.reshape(
                         tf.layers.dense(
-                            d,
+                            h,
                             self.num_params,
-                            kernel_initializer=init,
-                            reuse=tf.AUTO_REUSE
-                        )
+                            kernel_initializer=init
+                        ),
+                        [-1, self.num_params]
                     )
 
                     p = tf.nn.softmax(y_[:,0:M])
@@ -256,25 +275,23 @@ class Unconditional(ModelBase):
                         tf.logical_or(self.is_training, self.is_validating),
                         lambda: target_ta.read(t),
                         lambda: tf.concat(
-                            [tf.where(f < self.finish_line,
-                                      tf.zeros([self.batch_size, 1], dtype='float'),
-                                      tf.ones([self.batch_size, 1], dtype='float')),
-                             tf.expand_dims(lift_pdf.sample(), 1),
+                            [tf.expand_dims(lift_pdf.sample(), 1),
                              offset_pdf.sample()],
                             axis=-1
                         )
                     )
+                    x_ta = record.stroke.write(t, x)
 
-                    compute_loss = self.length
+                    compute_loss = t < self.length
                     loss = tf.where(
                         compute_loss,
                         -(
-                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1e20) +
+                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -40) +
                             lift_pdf.log_prob(x[:,0])
-                        )  / tf.cast(self.target_length, 'float'),
+                        )  / tf.cast(self.length, 'float'),
                         tf.zeros([self.batch_size])
                     )
-                    loss = tf.reshape(loss, [self.batch_size, 1])
+                    loss_ta = record.loss.write(t, loss)
 
                     sse = tf.where(
                         compute_loss,
@@ -284,10 +301,10 @@ class Unconditional(ModelBase):
                         ),
                         tf.zeros([self.batch_size])
                     )
-                    sse = tf.reshape(sse, [self.batch_size, 1])
-
-                    o_ta = o_ta.write(t, tf.concat([
-                        x, loss, sse, p, m1, m2, s1, s2, r, e
+                    sse_ta = record.sse.write(t, sse)
+                    
+                    param_ta = record.param.write(t, tf.concat([
+                        p, m1, m2, s1, s2, r, e
                     ], axis=-1))
 
                     return t + 1, \
@@ -302,7 +319,7 @@ class Unconditional(ModelBase):
                     size=self.max_length
                 ).unstack(tf.transpose(self.target, perm=[1,0,2]))
 
-                output_ta = tf.while_loop(
+                record = tf.while_loop(
                     condition,
                     forward,
                     [time,
@@ -315,7 +332,6 @@ class Unconditional(ModelBase):
                      )]
                 )[-1]
 
-            # FIX ALL THIS
             tf.transpose(record.param.stack(), perm=[1,0,2], name='param')
 
             stroke = tf.transpose(record.stroke.stack(), perm=[1,0,2])
@@ -343,46 +359,50 @@ class Unconditional(ModelBase):
     def num_params(self):
         return self.mixture_size * 6 + 1
 
-    def predict(self, x, train=False, **kwargs):
+    def predict(self, x, l, train=False, **kwargs):
         session = tf.get_default_session()
         learning_rate = kwargs.get('learning_rate', 1e-4)
         clip_threshold = kwargs.get('clip_threshold', 100)
+        keep_prob = kwargs.get('keep_prob', 1.0)
 
         if train:
             return session.run(
                 [self.stroke, self.loss, self.sse, self.optimization],
                 feed_dict={
                     self.target: x,
-                    self.length: len(x),
+                    self.length: l,
                     self.is_training: True,
                     self.is_validating: False,
                     self.learning_rate: learning_rate,
                     self.clip_threshold: clip_threshold,
+                    self.keep_prob: keep_prob
                 }
             )
         else:
-            if isinstance(x, int):
-                return session.run(
-                    [self.stroke],
-                    feed_dict={
-                        self.target: np.zeros([x, 3], 'float'),
-                        self.length: x,
-                        self.is_training: False,
-                        self.is_validating: False,
-                    }
-                )
-            else:
-                return session.run(
-                    [self.stroke, self.loss],
-                    feed_dict={
-                        self.target: x,
-                        self.length: len(x),
-                        self.is_training: False,
-                        self.is_validating: True,
-                    }
-                )
+            return session.run(
+                [self.stroke, self.loss, self.sse],
+                feed_dict={
+                    self.target: x,
+                    self.length: l,
+                    self.is_training: False,
+                    self.is_validating: True,
+                }
+            )
 
-
+    def synth(self, l, **kwargs):
+        session = tf.get_default_session()
+        
+        return session.run(
+            [self.stroke],
+            feed_dict={
+                self.target: np.zeros([1,1,STROKE_DIM], 'float32'),
+                self.length: [l],
+                self.is_training: False,
+                self.is_validating: False
+            }
+        )
+        
+                
 class Conditional(ModelBase):
     def __init__(self, **kwargs):
         ModelBase.__init__(self, 'Conditional', **kwargs)
@@ -703,7 +723,7 @@ class Conditional(ModelBase):
         )
 
 MDLDEF = path.join(path.dirname(path.dirname(path.realpath(__file__))), 'mdldef')
-def generate_unconditionally(random_seed=1, epoch=1):
+def generate_unconditionally(random_seed=1, epoch=0, model='unconditional', length=1000):
     # Input:
     #   random_seed - integer
 
@@ -711,13 +731,13 @@ def generate_unconditionally(random_seed=1, epoch=1):
     #   stroke - numpy 2D-array (T x 3)
 
     with tf.Session().as_default() as session:
-        model = Unconditional(mdldir='../mdldef/unconditional', epoch=epoch)
-        model.sampler.randomizer = np.random.RandomState(random_seed)
-        stroke, = model.predict(750)
+        unconditional = Unconditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
+        stroke, = unconditional.synth(length)
+    return stroke[0]
 
     # strokes = np.load('../data/strokes.npy', encoding='bytes')
     # stroke = strokes[0]
-    return stroke
+    #return stroke
 
 
 def generate_conditionally(text='welcome to lyrebird', random_seed=1,

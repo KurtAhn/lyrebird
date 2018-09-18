@@ -1,5 +1,6 @@
 import sys
 import numpy
+import PyQt5
 from matplotlib import pyplot
 from collections import deque
 from time import time
