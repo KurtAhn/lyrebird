@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+"""
+Synthesize with the synthesis network
+"""
 
 if __name__ == '__main__':
     import sys

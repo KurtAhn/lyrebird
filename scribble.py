@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+"""
+Synthesize with the prediction network
+"""
 
 if __name__ == '__main__':
     import sys
@@ -21,7 +24,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output', dest='output', default=None)
     args = parser.parse_args()
 
-    stroke = generate_unconditionally(        
+    stroke = generate_unconditionally(
         model=args.model,
         epoch=args.epoch,
         length=args.length

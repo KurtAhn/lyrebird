@@ -6,17 +6,20 @@ from os import path
 DATA_PATH = path.dirname(path.realpath(__file__))
 STROKE_DIM = 3
 
-def read_strokes(sort=True):
+def read_strokes():
+    """
+    Read in stroke.npy
+    """
     with open(path.join(DATA_PATH, 'strokes.npy'), 'rb') as f:
         strokes = np.load(f, encoding='bytes')
-    # for n in range(len(strokes)):
-    #     finish = np.zeros([len(strokes[n]), 1])
-    #     finish[-1,0] = 1.0
-    #     strokes[n] = np.concatenate([finish, strokes[n]], axis=-1)
     return strokes
 
 
 def standardize_strokes(strokes):
+    """
+    Standardize stroke offsets. Pen tip lift probability is not standardized.
+    (This was an oversight.)
+    """
     flattened = np.concatenate([s.reshape(-1, STROKE_DIM) for s in strokes])
     offset_mean = np.mean(flattened[:,-2:], axis=0)
     offset_scale = np.std(flattened[:,-2:], axis=0)
@@ -31,6 +34,11 @@ def standardize_strokes(strokes):
 
 
 def read_sentences():
+    """
+    Read in sentence.txt and flatten it into individual characters.
+    Return the character sequences along with an array of all character types
+    appearing in the file
+    """
     with open(path.join(DATA_PATH, 'sentences.txt')) as f:
         sentences = []
         flattened = []
@@ -42,6 +50,10 @@ def read_sentences():
 
 
 def unconditional_dataset(strokes, batch_size=1):
+    """
+    Create dataset for training the prediction network
+    Organized as (Stroke point sequence (dim: length x 3), Sequence length (scalar))
+    """
     s_ds = tf.data.Dataset.from_generator(
         lambda: strokes,
         'float'
@@ -59,6 +71,13 @@ def unconditional_dataset(strokes, batch_size=1):
 
 
 def conditional_dataset(text, strokes, batch_size=1):
+    """
+    Create dataset for training the synthesis network
+    Organized as (Character sequence (dim: length),
+                  Character sequence length (scalar),
+                  Stroke point sequence (dim: length x 3),
+                  Stroke length (scalar))
+    """
     t_ds = tf.data.Dataset.from_generator(
         lambda: text,
         'string'

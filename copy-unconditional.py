@@ -44,7 +44,7 @@ if __name__ == '__main__':
 
     with tf.Graph().as_default() as g2:
         with tf.Session().as_default() as s2:
-            new = Conditional(
+            new = Unconditional(
                 mixture_size=args.M,
                 num_units=args.N,
                 num_layers=args.D,

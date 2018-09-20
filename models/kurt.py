@@ -747,7 +747,7 @@ class Conditional(ModelBase):
 
 
 MDLDEF = path.join(path.dirname(path.dirname(path.realpath(__file__))), 'mdldef')
-def generate_unconditionally(random_seed=1, model='u', epoch=4, length=750):
+def generate_unconditionally(random_seed=1, model='u', epoch=5, length=750):
     # Input:
     #   random_seed - integer <-- I didn't implement this!! Not at all straightforward
     #                             to set the seed after model has been created in TF...
@@ -756,10 +756,9 @@ def generate_unconditionally(random_seed=1, model='u', epoch=4, length=750):
     #   stroke - numpy 2D-array (T x 3)
 
     tf.reset_default_graph()
-    with tf.Graph().as_default() as graph:
-        with tf.Session().as_default() as session:
-            unconditional = Unconditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
-            stroke, = unconditional.synth(length)
+    with tf.Session().as_default() as session:
+        unconditional = Unconditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
+        stroke, = unconditional.synth(length)
 
     return stroke[0]
 
@@ -769,7 +768,7 @@ def generate_unconditionally(random_seed=1, model='u', epoch=4, length=750):
 
 
 def generate_conditionally(text='welcome to lyrebird', random_seed=1,
-                           model='c', epoch=4,
+                           model='c', epoch=5,
                            sample_bias=1.0,
                            stroke_length=None):
     stroke_length = stroke_length or len(text.replace(' ', '')) * 30
