@@ -17,6 +17,7 @@ from collections import namedtuple
 from data import STROKE_DIM
 
 
+# Used for recording output at each step
 Record = namedtuple(
     'Record',
     ['stroke', 'loss', 'sse', 'param']
@@ -44,8 +45,8 @@ class ModelBase:
         else:
             try:
                 mdldir = kwargs.pop('mdldir')
-                suffix = kwargs.pop('suffix', '')
-                self._restore(mdldir, suffix)
+                epoch = kwargs.pop('epoch', None)
+                self._restore(mdldir, epoch)
             except KeyError:
                 raise ValueError('mdldir argument not provided')
 
@@ -58,7 +59,7 @@ class ModelBase:
         """
         g = tf.get_default_graph()
         meta = tf.train.import_meta_graph(path.join(mdldir, '_.meta'))
-        if epoch:
+        if epoch is not None:
             with open(path.join(mdldir, 'checkpoint'), 'w') as f:
                 f.write('model_checkpoint_path: "' +
                         path.join(path.realpath(mdldir), '_-{}'.format(epoch)) + '"')
@@ -71,8 +72,9 @@ class ModelBase:
 
         saver: tf.Saver object
         mdldir: Directory to save the model in
-        epoch: Number of epochs the model was trained for (used to distinguish
-            model descriptions under the same directory)
+        step: Version number used to distinguish
+            model descriptions under the same directory
+        meta: If True, save meta-graph
         """
         if meta:
             tf.train.export_meta_graph(
@@ -112,65 +114,23 @@ class ModelBase:
         return self[a]
 
 
-class Sampler(ModelBase):
-    def __init__(self, **kwargs):
-        ModelBase.__init__(self, 'Sampler', **kwargs)
-
-    def _create(self, **kwargs):
-        self._randomizer = np.random.RandomState(None)
-        M = self.mixture_size = kwargs.get('mixture_size', None)
-        with tf.name_scope(self.name) as scope:
-            def sample(e, w, m1, m2, s1, s2, r):
-                x0 = self.randomizer.binomial(1, e, 1).astype('float32')[0]
-                c = self.randomizer.choice(len(w), 1, p=w)
-                x12 = self.randomizer.multivariate_normal(
-                    np.stack([m1[c], m2[c]]).reshape([2]),
-                    np.stack([
-                        s1[c] ** 2, r[c] * s1[c] * s2[c],
-                        r[c] * s1[c] * s2[c], s2[c] ** 2
-                    ]).reshape([2, 2]),
-                    1
-                ).astype('float32')
-                return np.array([x0, x12[0][0], x12[0][1]])
-
-            if M is None:
-                args = [
-                    # tf.get_variable(name=name)
-                    self[name]
-                    for name in 'e w m1 m2 s1 s2 r'.split()
-                ]
-            else:
-                args = [
-                    tf.get_variable(initializer=np.zeros([1], dtype='float32'),
-                                    trainable=False,
-                                    name='e'),
-                    tf.get_variable(initializer=np.ones([M], dtype='float32') / M,
-                                    trainable=False,
-                                    name='w')
-                ] + [
-                    tf.get_variable(initializer=np.zeros([M], dtype='float32'),
-                                    trainable=False,
-                                    name=name)
-                    for name in 'm1 m2 s1 s2 r'.split()
-                ]
-
-            tf.py_func(sample, args, 'float', name='sample')
-            print(self.sample)
-
-    @property
-    def randomizer(self):
-        return self._randomizer
-
-    @randomizer.setter
-    def randomizer(self, randomizer):
-        self._randomizer = randomizer
-
-
 class Unconditional(ModelBase):
+    """
+    Handwriting prediction network
+    """
     def __init__(self, **kwargs):
         ModelBase.__init__(self, 'Unconditional', **kwargs)
 
     def _create(self, **kwargs):
+        """
+        **kwargs
+            mixture_size: Number of Gaussian mixture components
+            num_units: Number of RNN cell units
+            num_layers: Number of cells
+            offset_mean: If using standardized offset values, provide the
+                dataset mean value
+            offset_scale: Dataset standard deviation
+        """
         M = self.mixture_size = kwargs.get('mixture_size', 20)
         self.num_units = kwargs.get('num_units', 400)
         self.num_layers = kwargs.get('num_layers', 1)
@@ -200,11 +160,10 @@ class Unconditional(ModelBase):
             tf.reduce_max(self.length, name='max_length')
             tf.identity(tf.shape(self.length)[0], name='batch_size')
 
-            init = tf.contrib.layers.xavier_initializer()
-            func = tf.nn.tanh
-            with tf.variable_scope(
-                'rnn'
-            ):
+            with tf.variable_scope(self.name) as scope:
+                init = tf.contrib.layers.xavier_initializer()
+                func = tf.nn.tanh
+
                 rnns = [tf.contrib.rnn.LSTMCell(
                     num_units=self.num_units,
                     initializer=init,
@@ -243,12 +202,17 @@ class Unconditional(ModelBase):
                         [-1, self.num_params]
                     )
 
+                    # Mixture weight
                     p = tf.nn.softmax(y_[:,0:M])
+                    # Mixture mean
                     m1 = y_[:,M:2*M]
                     m2 = y_[:,2*M:3*M]
+                    # Mixture standard deviation
                     s1 = tf.exp(y_[:,3*M:4*M])
                     s2 = tf.exp(y_[:,4*M:5*M])
+                    # Mixture correlation
                     r = tf.nn.tanh(y_[:,5*M:6*M])
+                    # Probability of lifting the pen tip
                     e = tf.sigmoid(-y_[:,6*M:6*M+1])
 
                     lift_pdf = tfd.Bernoulli(probs=tf.reshape(e, [self.batch_size]), dtype='float')
@@ -267,6 +231,8 @@ class Unconditional(ModelBase):
                         )
                     )
 
+                    # Next input -- get from target sequence or
+                    # generate one by sampling from distribution
                     x = tf.cond(
                         tf.logical_or(self.is_training, self.is_validating),
                         lambda: target_ta.read(t),
@@ -278,11 +244,14 @@ class Unconditional(ModelBase):
                     )
                     x_ta = record.stroke.write(t, x)
 
+                    # This is for batch training; terminate early for
+                    # shorter sequences
                     compute_loss = t < self.length
+
                     loss = tf.where(
                         compute_loss,
                         -(
-                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -40) +
+                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1000) +
                             lift_pdf.log_prob(x[:,0])
                         )  / tf.cast(self.length, 'float'),
                         tf.zeros([self.batch_size])
@@ -315,6 +284,7 @@ class Unconditional(ModelBase):
                     size=self.max_length
                 ).unstack(tf.transpose(self.target, perm=[1,0,2]))
 
+                # Initial c- and h-state for LSTMs
                 qch = [rnns[d].zero_state(self.batch_size, dtype='float')
                        for d in range(self.num_layers)]
                 record = tf.while_loop(
@@ -358,6 +328,21 @@ class Unconditional(ModelBase):
         return self.mixture_size * 6 + 1
 
     def predict(self, x, l, train=False, **kwargs):
+        """
+        Train or validate model on a batch of sequences
+
+        x: Target sequence batch
+        l: Target sequence length batch
+        train: True to train, False to validate (no weight update)
+
+        **kwargs
+            learning_rate: Learning rate (ignored if train == False)
+            clip_threshold: Clip gradient to this (ignored if train == False)
+            keep_prob: Dropout retain probability (ignored if train == False)
+
+        returns stroke output, log loss, and sum squared error if train == False;
+            and all three + output of the optimization operation if train == True
+        """
         session = tf.get_default_session()
         learning_rate = kwargs.get('learning_rate', 1e-4)
         clip_threshold = kwargs.get('clip_threshold', 100)
@@ -388,6 +373,14 @@ class Unconditional(ModelBase):
             )
 
     def synth(self, l, **kwargs):
+        """
+        Produce handwriting sequence of a given length
+
+        l: Length of the sequence to produce (scalar)
+
+        **kwargs
+            (No arguments)
+        """
         session = tf.get_default_session()
 
         return session.run(
@@ -402,10 +395,26 @@ class Unconditional(ModelBase):
 
 
 class Conditional(ModelBase):
+    """
+    Handwriting synthesis network
+    """
     def __init__(self, **kwargs):
         ModelBase.__init__(self, 'Conditional', **kwargs)
 
     def _create(self, **kwargs):
+        """
+        **kwargs
+            output_mixture_size: Number of mixture components for the
+                output layer
+            window_mixture_size: Number of mixture components for the
+                window layer
+            num_units: Number of RNN cell units
+            num_layers: Number of cells
+            character_types: List of character types (required)
+            offset_mean: If using standardized offset values, provide the
+                dataset mean value
+            offset_scale: Dataset standard deviation
+        """
         M = self.output_mixture_size = kwargs.get('output_mixture_size', 20)
         K = self.window_mixture_size = kwargs.get('window_mixture_size', 10)
         self.num_units = kwargs.get('num_units', 400)
@@ -429,7 +438,7 @@ class Conditional(ModelBase):
                 name='keep_prob'
             )
 
-            # For sampling
+            # For biased sampling
             tf.placeholder_with_default(
                 tf.constant(0.0, 'float'),
                 shape=[],
@@ -454,10 +463,7 @@ class Conditional(ModelBase):
 
             init = tf.contrib.layers.xavier_initializer()
             func = tf.nn.tanh
-            with tf.variable_scope(
-                'rnn'
-                # initializer=init
-            ):
+            with tf.variable_scope(self.name):
                 rnns = [tf.contrib.rnn.LSTMCell(
                     num_units=self.num_units,
                     initializer=init,
@@ -483,9 +489,13 @@ class Conditional(ModelBase):
                                         (tf.concat([x, w], axis=-1), [qc[0], qh[0]])
                     h = dropout(h)
 
-                    # This is to account for the fact that there's about 21.7 strokes per character
+                    # This is to account for the fact that there are about
+                    # 21.7 strokes per character
+                    # Without this bit, initially kappa would increment by 1
+                    # on average, which is too fast
                     bias = np.zeros([3*K], dtype='float32')
                     bias[2*K:] = np.log(1.0/21.7) * np.ones([K], dtype='float32')
+
                     z_ = tf.reshape(tf.layers.dense(
                         h,
                         3*K,
@@ -507,27 +517,32 @@ class Conditional(ModelBase):
                         character_table.lookup(self.text),
                         self.num_chars
                     )
-                    mask = tf.tile(
-                        tf.reshape(
-                            u_range,
-                            [1, -1, 1]
-                        ),
-                        [self.batch_size, 1, self.num_chars]
-                    )
-                    c = tf.where(
-                        mask <= tf.expand_dims(
-                            tf.tile(
-                                tf.expand_dims(
-                                    tf.cast(self.text_length, 'float'),
-                                    -1
-                                ),
-                                [1, self.max_text_length]
-                            ),
-                            -1
-                        ),
-                        c,
-                        tf.zeros_like(mask)
-                    )
+
+                    # The following bit is for accurately computing the window
+                    # function by early terminating shorter text sequences.
+                    # Commented out for performance reason, since not using batch training.
+
+                    # mask = tf.tile(
+                    #     tf.reshape(
+                    #         u_range,
+                    #         [1, -1, 1]
+                    #     ),
+                    #     [self.batch_size, 1, self.num_chars]
+                    # )
+                    # c = tf.where(
+                    #     mask <= tf.expand_dims(
+                    #         tf.tile(
+                    #             tf.expand_dims(
+                    #                 tf.cast(self.text_length, 'float'),
+                    #                 -1
+                    #             ),
+                    #             [1, self.max_text_length]
+                    #         ),
+                    #         -1
+                    #     ),
+                    #     c,
+                    #     tf.zeros_like(mask)
+                    # )
                     phi = tf.reduce_sum(
                         tf.expand_dims(a, -1) * \
                         tf.exp(
@@ -580,7 +595,16 @@ class Conditional(ModelBase):
                         tf.logical_or(self.is_training, self.is_validating),
                         lambda: target_ta.read(t),
                         lambda: tf.concat(
-                            [tf.expand_dims(lift_pdf.sample(), 1),
+                            [
+                             # Maybe the pen tip lift value should be definite?
+                             # Otherwise, high sampling bias still leads to heavily
+                             # different sequences to be produced on each run
+                             # tf.where(
+                             #    e < 0.039828256 + 0.19555554, # Mean + std of e
+                             #    tf.zeros_like(e),
+                             #    tf.ones_like(e)
+                             # ),
+                             tf.expand_dims(lift_pdf.sample(), 1),
                              offset_pdf.sample()],
                             axis=-1
                         )
@@ -591,7 +615,7 @@ class Conditional(ModelBase):
                     loss = tf.where(
                         compute_loss,
                         -(
-                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -40) +
+                            tf.maximum(offset_pdf.log_prob(x[:,-2:]), -1000) +
                             lift_pdf.log_prob(x[:,0])
                         )  / tf.cast(self.target_length, 'float'),
                         tf.zeros([self.batch_size])
@@ -723,16 +747,20 @@ class Conditional(ModelBase):
 
 
 MDLDEF = path.join(path.dirname(path.dirname(path.realpath(__file__))), 'mdldef')
-def generate_unconditionally(random_seed=1, model='unconditional', epoch=0, length=1000):
+def generate_unconditionally(random_seed=1, model='u', epoch=4, length=750):
     # Input:
-    #   random_seed - integer
+    #   random_seed - integer <-- I didn't implement this!! Not at all straightforward
+    #                             to set the seed after model has been created in TF...
 
     # Output:
     #   stroke - numpy 2D-array (T x 3)
 
-    with tf.Session().as_default() as session:
-        unconditional = Unconditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
-        stroke, = unconditional.synth(length)
+    tf.reset_default_graph()
+    with tf.Graph().as_default() as graph:
+        with tf.Session().as_default() as session:
+            unconditional = Unconditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
+            stroke, = unconditional.synth(length)
+
     return stroke[0]
 
     # strokes = np.load('../data/strokes.npy', encoding='bytes')
@@ -741,17 +769,28 @@ def generate_unconditionally(random_seed=1, model='unconditional', epoch=0, leng
 
 
 def generate_conditionally(text='welcome to lyrebird', random_seed=1,
-                           model='conditional', epoch=0,
-                           sample_bias=0.0,
-                           stroke_length=1000):
+                           model='c', epoch=4,
+                           sample_bias=1.0,
+                           stroke_length=None):
+    stroke_length = stroke_length or len(text.replace(' ', '')) * 30
+    tf.reset_default_graph()
     with tf.Session().as_default() as session:
         conditional = Conditional(mdldir=path.join(MDLDEF, model), epoch=epoch)
         session.run(tf.tables_initializer())
         stroke, param = conditional.synth(np.array([c for c in text]),
                                           sample_bias=sample_bias,
                                           max_length=stroke_length)
-    from matplotlib import pyplot
-    pyplot.imshow(param[0,:,121:].T, vmax=1)
+    # from matplotlib import pyplot
+    #
+    # heat = param[0,:,97:].T
+    # mean = np.mean(heat)
+    # std = np.std(heat)
+    # pyplot.imshow(heat, aspect='auto')
     # pyplot.colorbar()
-    pyplot.show()
+    #
+    # pyplot.show()
     return stroke[0]
+
+
+def recognize_stroke(stroke):
+    return 'not implemented'

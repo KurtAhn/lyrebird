@@ -30,7 +30,7 @@ if __name__ == '__main__':
         sample_bias=args.sample_bias,
         stroke_length=args.stroke_length or len(args.text.replace(' ', '')) * 30
     )
-    
+
     print('Stroke length: {}'.format(len(stroke)))
 
     plot_stroke(stroke, save_name=args.output)

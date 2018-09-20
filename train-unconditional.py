@@ -48,17 +48,17 @@ if __name__ == '__main__':
 
         train_size = 5500
         train = unconditional_dataset(
-            sort_strokes(strokes[:train_size]),
+            strokes[:train_size],
             batch_size=args.batch_size
-        ).shuffle(min(train_size, 10000), seed=1337)
+        ).shuffle(train_size, seed=1337)
         train_iterator = train.make_initializable_iterator()
         train_example = train_iterator.get_next()
 
         valid_size = 500
         valid = unconditional_dataset(
-            sort_strokes(strokes[-valid_size:]),
+            strokes[-valid_size:],
             batch_size=args.batch_size
-        ).shuffle(min(valid_size, 10000), seed=1337)
+        ).shuffle(valid_size, seed=1337)
         valid_iterator = valid.make_initializable_iterator()
         valid_example = valid_iterator.get_next()
 
@@ -69,7 +69,7 @@ if __name__ == '__main__':
             offset_mean=offset_mean,
             offset_scale=offset_scale
         )
-        
+
         session.run(tf.global_variables_initializer())
         saver = tf.train.Saver(max_to_keep=0)
         summarizer = tf.summary.FileWriter(

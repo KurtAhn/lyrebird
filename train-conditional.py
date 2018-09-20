@@ -33,6 +33,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--dont-standardize', dest='standardize', action='store_false')
     parser.add_argument('-b', '--batch-size', dest='batch_size', type=int, default=10)
     parser.add_argument('-m', '--model', dest='model', required=True)
+    parser.add_argument('-e', '--epoch', dest='epoch', type=int, default=0)
 
     args = parser.parse_args()
 
@@ -51,41 +52,46 @@ if __name__ == '__main__':
         train_size = 5500
         train = conditional_dataset(
             sentences[:train_size],
-            sort_strokes(strokes[:train_size]),
+            strokes[:train_size],
             batch_size=args.batch_size
-        ).shuffle(min(train_size, 10000), seed=1337)
+        ).shuffle(train_size, seed=1337)
         train_iterator = train.make_initializable_iterator()
         train_example = train_iterator.get_next()
 
         valid_size = 500
         valid = conditional_dataset(
             sentences[-valid_size:],
-            sort_strokes(strokes[-valid_size:]),
+            strokes[-valid_size:],
             batch_size=args.batch_size
         )
         valid_iterator = valid.make_initializable_iterator()
         valid_example = valid_iterator.get_next()
 
-        model = Conditional(
-            output_mixture_size=args.M,
-            window_mixture_size=args.K,
-            num_units=args.N,
-            num_layers=args.D,
-            offset_mean=offset_mean,
-            offset_scale=offset_scale,
-            character_types=vocab
-        )
 
-        session.run(tf.global_variables_initializer())
-        session.run(tf.tables_initializer())
-        saver = tf.train.Saver(max_to_keep=0)
+        if args.epoch:
+            model = Conditional(mdldir=mdldir, epoch=args.epoch)
+            session.run(tf.tables_initializer())
+            saver = tf.train.Saver(max_to_keep=0)
+        else:
+            model = Conditional(
+                output_mixture_size=args.M,
+                window_mixture_size=args.K,
+                num_units=args.N,
+                num_layers=args.D,
+                offset_mean=offset_mean,
+                offset_scale=offset_scale,
+                character_types=vocab
+            )
+            session.run(tf.global_variables_initializer())
+            session.run(tf.tables_initializer())
+            model.save(saver, mdldir, 0, meta=True)
+
         summarizer = tf.summary.FileWriter(
             path.join(MDLDEF, 'train', args.model),
             graph=session.graph
         )
-        model.save(saver, mdldir, 0, meta=True)
 
-        epochs = 0
+        epochs = args.epoch
         while True:
             epochs += 1
 

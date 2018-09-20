@@ -16,10 +16,6 @@ def read_strokes(sort=True):
     return strokes
 
 
-def sort_strokes(strokes):
-    return strokes[np.argsort([len(s) for s in strokes])]
-
-
 def standardize_strokes(strokes):
     flattened = np.concatenate([s.reshape(-1, STROKE_DIM) for s in strokes])
     offset_mean = np.mean(flattened[:,-2:], axis=0)
